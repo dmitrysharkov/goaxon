@@ -22,8 +22,15 @@ type Command interface {
 }
 
 // Handler processes a single command of type C and optionally returns
-// a result of type R. Use struct{} for R when no return value is needed.
+// a result of type R. Use NoResult for R when no return value is needed.
 type Handler[C Command, R any] func(ctx context.Context, cmd C) (R, error)
+
+// NoResult is the conventional R for commands that don't produce a
+// return value. It's an alias for struct{}, so existing code using
+// `struct{}` literally keeps working — the alias is purely a
+// readability cue at call sites: `command.Send[PlaceOrder, command.NoResult]`
+// reads better than `command.Send[PlaceOrder, struct{}]`.
+type NoResult = struct{}
 
 // Bus routes commands to their registered handler. It's safe for
 // concurrent use; registration is expected at startup, dispatch at

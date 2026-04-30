@@ -26,7 +26,8 @@ goaxon/
 ├── command/           Type-safe command bus (generics, no reflection)
 ├── query/             Type-safe query bus
 ├── validation/        Generic Validator + Error for parse-don't-validate at app boundary
-├── typ/               Generic type primitives — Unit (alias for struct{}), Maybe[T], more later
+├── types/             Umbrella for small generic-type primitives — one package per concept
+│   └── maybe/         Maybe[T] (Some / None) for optional VO fields
 ├── store/
 │   ├── memory/        In-memory Store and Bus
 │   └── postgres/      Postgres Store with transactional outbox (pgx/v5)
@@ -80,7 +81,8 @@ go test ./...
 - **Hexagonal-friendly examples.** The orders aggregate is one core; the in-process and HTTP demos are two driving adapters against it. Adding gRPC, a CLI, or a queue consumer is a sibling directory, not a fork.
 - **Application-layer facade in the example.** `examples/orders/app` exposes typed methods (`PlaceOrder`, `ShipOrder`, `GetOrder`) that adapters call instead of touching the command/query bus directly. The bus stays as the dispatch mechanism beneath; the app layer just gives adapters a stable API and centralises error mapping (`event.ErrStreamNotFound` and `domain.ErrNotFound` → `app.ErrNotFound`).
 - **Parse-don't-validate at the app boundary.** Aggregate methods take value objects (`CustomerName`, `Amount`, `Notes`, etc.) — invalid values are not representable. Adapters pass raw primitives (string, int) into the app layer; the app layer parses and accumulates failures via `goaxon/validation`, returning `*validation.Error` which adapters render as 422 / structured field errors.
-- **Optional fields use `typ.Maybe[T]`, not `*T`.** When a domain field is genuinely optional (the orders example has an optional `Notes`), `typ.Maybe[T]` makes "absent" an explicit, value-typed state with the comma-ok idiom (`v, ok := m.Get()`). It JSON-marshals as `null`/value symmetrically. `*T` would conflate absence with pointer-aliasing and risk nil-deref panics downstream. Adapters still receive `*string` for optional JSON fields (idiomatic) — the app layer is where `*string` becomes `Maybe[T]`. The `typ` package is the home for small generic-type primitives (Maybe and a `Unit` alias today; List and friends later).
+- **Optional fields use `maybe.Maybe[T]`, not `*T`.** When a domain field is genuinely optional (the orders example has an optional `Notes`), `maybe.Maybe[T]` makes "absent" an explicit, value-typed state with the comma-ok idiom (`v, ok := m.Get()`). It JSON-marshals as `null`/value symmetrically. `*T` would conflate absence with pointer-aliasing and risk nil-deref panics downstream. Adapters still receive `*string` for optional JSON fields (idiomatic) — the app layer is where `*string` becomes `Maybe[T]`. Lives at `types/maybe`; siblings (`types/list`, `types/result`, …) get added under the same convention as needs arise.
+- **`command.NoResult` for "void" command results.** Alias for `struct{}` — purely a readability cue. `command.Send[PlaceOrder, command.NoResult]` reads better than `command.Send[PlaceOrder, struct{}]`. The two are interchangeable.
 - **Black-box aggregate tests.** `aggregate/aggregatetest` provides a Given/When/Then harness using only the aggregate's public surface — no internals of `Base` are exposed to support testing.
 - **`context.Context` everywhere.** Cancellation, deadlines, and tracing flow through every dispatch.
 

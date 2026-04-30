@@ -1,6 +1,5 @@
-// This file holds Maybe[T] — the generic optional-value type from
-// typed-functional languages, adapted to Go. The package-level doc
-// is in typ.go.
+// Package maybe provides Maybe[T] — the generic optional-value type
+// from typed-functional languages, adapted to Go.
 //
 // A Maybe[T] either contains a value (Some) or is empty (None). It's
 // useful for fields that are genuinely optional in the domain, where
@@ -10,13 +9,18 @@
 // string is invalid for a non-empty value object — there's no way to
 // represent "absent" with the value alone).
 //
-//	notes := typ.Some(notesVO)         // present
-//	none  := typ.None[Notes]()         // absent
+//	notes := maybe.Some(notesVO)        // present
+//	none  := maybe.None[Notes]()        // absent
 //	if v, ok := notes.Get(); ok { ... } // standard Go idiom
 //
 // Wire format: Maybe[T] marshals to JSON as either the marshaled T
 // (Some) or null (None). It unmarshals symmetrically.
-package typ
+//
+// The package follows Go's "stutter is fine when package = concept"
+// convention (cf. time.Time, regexp.Regexp). The `types/` umbrella
+// is purely organisational — siblings will be `types/list`,
+// `types/result`, etc. as new primitives are added.
+package maybe
 
 import (
 	"bytes"

@@ -27,7 +27,7 @@ import (
 	"github.com/dmitrysharkov/goaxon/aggregate"
 	"github.com/dmitrysharkov/goaxon/command"
 	"github.com/dmitrysharkov/goaxon/event"
-	"github.com/dmitrysharkov/goaxon/typ"
+	"github.com/dmitrysharkov/goaxon/types/maybe"
 	"github.com/dmitrysharkov/goaxon/query"
 	"github.com/google/uuid"
 )
@@ -105,7 +105,7 @@ func (a Amount) Cents() int { return int(a) }
 // Notes is an optional free-text note on an order. When present it
 // must be non-empty and at most 500 characters. "Optional" means the
 // note can be absent, not that an empty value is valid — absence is
-// represented by typ.None[Notes]() in the surrounding fields.
+// represented by maybe.None[Notes]() in the surrounding fields.
 type Notes string
 
 func ParseNotes(s string) (Notes, error) {
@@ -125,7 +125,7 @@ type PlaceOrder struct {
 	OrderID      OrderID
 	CustomerName CustomerName
 	Amount       Amount
-	Notes        typ.Maybe[Notes]
+	Notes        maybe.Maybe[Notes]
 }
 
 func (PlaceOrder) CommandType() string { return "PlaceOrder" }
@@ -146,7 +146,7 @@ func (ShipOrder) CommandType() string { return "ShipOrder" }
 type OrderPlaced struct {
 	CustomerName CustomerName       `json:"customer_name"`
 	Amount       Amount             `json:"amount"`
-	Notes        typ.Maybe[Notes] `json:"notes"`
+	Notes        maybe.Maybe[Notes] `json:"notes"`
 }
 
 func (OrderPlaced) EventType() string { return "OrderPlaced" }
@@ -197,8 +197,8 @@ func (o *Order) Apply(e event.Event) {
 
 // Place raises OrderPlaced if the order is new. The VOs are already
 // valid by construction, so the only check left here is the state
-// transition. Notes is optional — pass typ.None[Notes]() if absent.
-func (o *Order) Place(name CustomerName, amount Amount, notes typ.Maybe[Notes]) error {
+// transition. Notes is optional — pass maybe.None[Notes]() if absent.
+func (o *Order) Place(name CustomerName, amount Amount, notes maybe.Maybe[Notes]) error {
 	if o.status != statusNew {
 		return errors.New("order already placed")
 	}
@@ -225,7 +225,7 @@ type OrderSummary struct {
 	OrderID      OrderID            `json:"order_id"`
 	CustomerName CustomerName       `json:"customer_name"`
 	Amount       Amount             `json:"amount"`
-	Notes        typ.Maybe[Notes] `json:"notes"`
+	Notes        maybe.Maybe[Notes] `json:"notes"`
 	Shipped      bool               `json:"shipped"`
 }
 
@@ -303,30 +303,30 @@ func Wire(
 	eventBus.Subscribe("OrderPlaced", summary.OnOrderPlaced)
 	eventBus.Subscribe("OrderShipped", summary.OnOrderShipped)
 
-	command.Register(commandBus, func(ctx context.Context, cmd PlaceOrder) (typ.Unit, error) {
+	command.Register(commandBus, func(ctx context.Context, cmd PlaceOrder) (command.NoResult, error) {
 		rawID := uuid.UUID(cmd.OrderID)
 		o, err := repo.Load(ctx, rawID)
 		switch {
 		case errors.Is(err, event.ErrStreamNotFound):
 			o = NewOrder(rawID)
 		case err != nil:
-			return typ.Unit{}, err
+			return command.NoResult{}, err
 		}
 		if err := o.Place(cmd.CustomerName, cmd.Amount, cmd.Notes); err != nil {
-			return typ.Unit{}, err
+			return command.NoResult{}, err
 		}
-		return typ.Unit{}, repo.Save(ctx, o)
+		return command.NoResult{}, repo.Save(ctx, o)
 	})
 
-	command.Register(commandBus, func(ctx context.Context, cmd ShipOrder) (typ.Unit, error) {
+	command.Register(commandBus, func(ctx context.Context, cmd ShipOrder) (command.NoResult, error) {
 		o, err := repo.Load(ctx, uuid.UUID(cmd.OrderID))
 		if err != nil {
-			return typ.Unit{}, err
+			return command.NoResult{}, err
 		}
 		if err := o.Ship(); err != nil {
-			return typ.Unit{}, err
+			return command.NoResult{}, err
 		}
-		return typ.Unit{}, repo.Save(ctx, o)
+		return command.NoResult{}, repo.Save(ctx, o)
 	})
 
 	query.Register(queryBus, func(_ context.Context, q GetOrderSummary) (OrderSummary, error) {

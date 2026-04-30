@@ -16,7 +16,8 @@ goaxon/
 ├── command/        Type-safe command bus (generics-based)
 ├── query/          Type-safe query bus (generics-based)
 ├── validation/     Generic Validator + ValidationError for app-layer parse-don't-validate
-├── typ/            Generic type primitives — Unit alias and Maybe[T]; growth area for List etc.
+├── types/          Umbrella for small generic-type primitives (one package per type)
+│   └── maybe/      Maybe[T] (Some / None) for optional VO fields; siblings (list, result, …) added as needed
 ├── store/
 │   ├── memory/     In-memory Store and Bus implementations
 │   └── postgres/   Postgres-backed Store with transactional outbox (pgx/v5)
@@ -53,14 +54,18 @@ Command and query buses are parameterised on the command/query type and result
 type:
 
 ```go
-command.Register[PlaceOrder, struct{}](bus, handler)
-command.Send[PlaceOrder, struct{}](ctx, bus, cmd)
+command.Register[PlaceOrder, command.NoResult](bus, handler)
+command.Send[PlaceOrder, command.NoResult](ctx, bus, cmd)
 ```
 
 Axon (Java) uses runtime annotations and reflection. We deliberately don't —
 generics give us compile-time type safety, no reflection in hot paths, and
 better IDE support. The trade-off is slightly more verbose call sites; we
 think that's worth it.
+
+`command.NoResult` is an alias for `struct{}` — purely a readability
+cue for the "command produces no value" case. The two are
+interchangeable; existing code using `struct{}` keeps working.
 
 Do not introduce reflection-based handler discovery. If ergonomics suffer,
 fix them with helper functions, not reflection.
@@ -248,10 +253,18 @@ not framework code. Don't propose `UnmarshalJSON`-with-validation
 again — we discussed it, and the read-time re-judging breaks event
 sourcing semantics.
 
-### Optional VOs use `typ.Maybe[T]`, not `*T`
+### Optional VOs use `maybe.Maybe[T]`, not `*T`
+Lives at `types/maybe`. Convention: each generic-type primitive gets
+its own subpackage under `types/`, named after the concept; the type
+inside takes the same name (`maybe.Maybe`, `list.List`, `date.Date`),
+matching Go's `time.Time` / `regexp.Regexp` stutter convention. The
+`types/` umbrella is purely organisational — there's no shared package
+named `types`. Add new primitives as `types/<name>/<name>.go` and
+forget about it.
+
 For fields that are genuinely optional in the domain (the orders
 example has an optional `Notes` on each order), wrap in
-`typ.Maybe[T]` rather than using `*T`. Reasons:
+`maybe.Maybe[T]` rather than using `*T`. Reasons:
 
 - `Maybe[T]` makes "absent" an explicit, value-typed state. `*T`
   conflates absence with pointer-aliasing semantics callers usually
