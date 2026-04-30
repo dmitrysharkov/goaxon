@@ -144,27 +144,90 @@ func insertEvent(ctx context.Context, tx pgx.Tx, env event.Envelope) error {
 	return nil
 }
 
-// LoadPending implements event.Outbox. Returns up to batchSize entries
-// in id order. No locking — at-least-once delivery is acceptable per
-// the framework's idempotent-handler contract, and a single dispatcher
-// per process is the v1 expectation.
-func (s *Store) LoadPending(ctx context.Context, batchSize int) ([]event.OutboxEntry, error) {
+// Claim implements event.Outbox. It opens a transaction, locks up to
+// batchSize undispatched rows with SELECT … FOR UPDATE SKIP LOCKED,
+// and returns a Claim handle that owns the transaction until Commit
+// or Release. Other concurrent Claim calls will skip the locked rows
+// (the SKIP LOCKED clause), so multiple dispatchers can run safely
+// against the same outbox.
+//
+// The empty case (no pending rows) returns a Claim with an empty
+// Entries() slice and a nil tx; its Commit/Release are no-ops.
+func (s *Store) Claim(ctx context.Context, batchSize int) (event.Claim, error) {
 	if batchSize <= 0 {
-		return nil, nil
+		return &claim{}, nil
 	}
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: claim begin: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
         SELECT id, aggregate_id, aggregate_type, sequence, event_type, payload, metadata, occurred_at
         FROM outbox
         WHERE dispatched_at IS NULL
         ORDER BY id
-        LIMIT $1`,
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED`,
 		batchSize,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: outbox query: %w", err)
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("postgres: claim query: %w", err)
 	}
-	defer rows.Close()
+	entries, scanErr := scanOutboxRows(rows, s.registry)
+	rows.Close()
+	if scanErr != nil {
+		_ = tx.Rollback(ctx)
+		return nil, scanErr
+	}
+	if len(entries) == 0 {
+		// Nothing to do — close the tx so we don't park a connection.
+		if err := tx.Rollback(ctx); err != nil {
+			return nil, fmt.Errorf("postgres: claim rollback empty: %w", err)
+		}
+		return &claim{}, nil
+	}
+	return &claim{tx: tx, entries: entries}, nil
+}
 
+// claim is the Postgres-side implementation of event.Claim. It owns the
+// pgx.Tx that holds the row locks until Commit or Release ends it.
+type claim struct {
+	tx      pgx.Tx
+	entries []event.OutboxEntry
+}
+
+func (c *claim) Entries() []event.OutboxEntry { return c.entries }
+
+func (c *claim) Commit(ctx context.Context, ids []int64) error {
+	if c.tx == nil {
+		return nil
+	}
+	if len(ids) > 0 {
+		if _, err := c.tx.Exec(ctx,
+			`UPDATE outbox SET dispatched_at = now() WHERE id = ANY($1)`, ids,
+		); err != nil {
+			_ = c.tx.Rollback(ctx)
+			return fmt.Errorf("postgres: claim mark dispatched: %w", err)
+		}
+	}
+	if err := c.tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: claim commit: %w", err)
+	}
+	return nil
+}
+
+func (c *claim) Release(ctx context.Context) error {
+	if c.tx == nil {
+		return nil
+	}
+	if err := c.tx.Rollback(ctx); err != nil {
+		return fmt.Errorf("postgres: claim release: %w", err)
+	}
+	return nil
+}
+
+func scanOutboxRows(rows pgx.Rows, registry *event.Registry) ([]event.OutboxEntry, error) {
 	var out []event.OutboxEntry
 	for rows.Next() {
 		var (
@@ -178,7 +241,7 @@ func (s *Store) LoadPending(ctx context.Context, batchSize int) ([]event.OutboxE
 		if err := rows.Scan(&outboxID, &aggIDBytes, &aggType, &sequence, &eventType, &payload, &metadataRaw, &occurredAt); err != nil {
 			return nil, fmt.Errorf("postgres: outbox scan: %w", err)
 		}
-		evt, err := s.registry.Unmarshal(eventType, payload)
+		evt, err := registry.Unmarshal(eventType, payload)
 		if err != nil {
 			return nil, err
 		}
@@ -204,21 +267,6 @@ func (s *Store) LoadPending(ctx context.Context, batchSize int) ([]event.OutboxE
 		return nil, fmt.Errorf("postgres: outbox rows: %w", err)
 	}
 	return out, nil
-}
-
-// MarkDispatched implements event.Outbox.
-func (s *Store) MarkDispatched(ctx context.Context, ids []int64) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	_, err := s.pool.Exec(ctx,
-		`UPDATE outbox SET dispatched_at = now() WHERE id = ANY($1)`,
-		ids,
-	)
-	if err != nil {
-		return fmt.Errorf("postgres: mark dispatched: %w", err)
-	}
-	return nil
 }
 
 // Load implements event.Store. Events are returned in sequence order.

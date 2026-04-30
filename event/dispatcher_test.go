@@ -38,7 +38,10 @@ func (s *stubOutbox) add(payload event.Event) {
 	})
 }
 
-func (s *stubOutbox) LoadPending(_ context.Context, batchSize int) ([]event.OutboxEntry, error) {
+// Claim implements event.Outbox. The stub doesn't model row-level
+// locking — Dispatcher unit tests don't exercise multi-claim concurrency
+// (that's an integration concern, covered by the postgres tests).
+func (s *stubOutbox) Claim(_ context.Context, batchSize int) (event.Claim, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loadErr != nil {
@@ -47,27 +50,10 @@ func (s *stubOutbox) LoadPending(_ context.Context, batchSize int) ([]event.Outb
 	if batchSize > len(s.entries) {
 		batchSize = len(s.entries)
 	}
-	return append([]event.OutboxEntry(nil), s.entries[:batchSize]...), nil
-}
-
-func (s *stubOutbox) MarkDispatched(_ context.Context, ids []int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.markErr != nil {
-		return s.markErr
-	}
-	mark := make(map[int64]bool, len(ids))
-	for _, id := range ids {
-		mark[id] = true
-	}
-	kept := s.entries[:0]
-	for _, e := range s.entries {
-		if !mark[e.OutboxID] {
-			kept = append(kept, e)
-		}
-	}
-	s.entries = kept
-	return nil
+	return &stubClaim{
+		parent:  s,
+		entries: append([]event.OutboxEntry(nil), s.entries[:batchSize]...),
+	}, nil
 }
 
 func (s *stubOutbox) pending() int {
@@ -75,6 +61,38 @@ func (s *stubOutbox) pending() int {
 	defer s.mu.Unlock()
 	return len(s.entries)
 }
+
+type stubClaim struct {
+	parent  *stubOutbox
+	entries []event.OutboxEntry
+}
+
+func (c *stubClaim) Entries() []event.OutboxEntry { return c.entries }
+
+func (c *stubClaim) Commit(_ context.Context, ids []int64) error {
+	c.parent.mu.Lock()
+	defer c.parent.mu.Unlock()
+	if c.parent.markErr != nil {
+		return c.parent.markErr
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	mark := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		mark[id] = true
+	}
+	kept := c.parent.entries[:0]
+	for _, e := range c.parent.entries {
+		if !mark[e.OutboxID] {
+			kept = append(kept, e)
+		}
+	}
+	c.parent.entries = kept
+	return nil
+}
+
+func (c *stubClaim) Release(_ context.Context) error { return nil }
 
 type stubBus struct {
 	mu       sync.Mutex

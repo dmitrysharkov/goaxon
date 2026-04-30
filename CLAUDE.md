@@ -128,15 +128,27 @@ An out-of-band `event.Dispatcher` reads the outbox and publishes.
 This keeps the in-memory store untouched (still synchronous publish) and
 avoids growing `Repository`'s constructor with a "publisher strategy" knob.
 
-Delivery is at-least-once: a Publish that succeeds but a MarkDispatched
+`event.Outbox` exposes a single `Claim(ctx, batchSize)` method returning
+an `event.Claim`. Claim-based instead of plain `LoadPending`/`MarkDispatched`
+because the lock has to live across `load → publish → mark`: the Postgres
+implementation runs `SELECT … FOR UPDATE SKIP LOCKED` inside a long-lived
+transaction that `Claim.Commit` (UPDATE + commit) or `Claim.Release`
+(rollback) closes out. As a result **multiple dispatchers can run safely
+against the same outbox** — concurrent claims see disjoint sets of rows,
+and a crashed dispatcher's locks are released by Postgres when its
+connection drops. See [NOTES.md](NOTES.md) for the lease-via-`claimed_at`
+alternative we considered and why we didn't pick it.
+
+Delivery is at-least-once: a Publish that succeeds but a Commit
 that subsequently fails (or a process crash between the two) will
 redeliver. The framework's "handlers must be idempotent" rule absorbs
 that — see Conventions.
 
 The Dispatcher stops a batch on the first publish error to preserve
-ordering for projections; the failing entry stays pending and is retried
-on the next tick. There is no built-in DLQ — surface failures via
-`WithErrorHandler` and decide policy yourself.
+ordering for projections; the failing entry stays pending (the claim
+is Released without marking) and is retried on the next tick. There
+is no built-in DLQ — surface failures via `WithErrorHandler` and
+decide policy yourself.
 
 ### Aggregate IDs are `uuid.UUID`
 `event.Envelope.AggregateID`, `aggregate.Root.AggregateID()`, and the
@@ -214,11 +226,6 @@ These are documented gaps, not things to fix without discussion:
    with a `Snapshotter` interface.
 4. **No event upcasters.** Renaming an event type or changing its payload
    shape is currently a breaking change to the event log.
-5. **Postgres dispatcher is single-instance.** `LoadPending` uses a plain
-   `LIMIT`, no `SELECT … FOR UPDATE SKIP LOCKED`. Running multiple
-   dispatchers against the same outbox would double-publish. Single
-   dispatcher per process is fine for v1; multi-dispatcher safety is a
-   follow-up.
 
 ---
 
@@ -226,8 +233,8 @@ These are documented gaps, not things to fix without discussion:
 
 - [x] Postgres event store with transactional outbox
 - [x] UUIDv7 aggregate IDs (typed `uuid.UUID` at the framework boundary)
+- [x] Multi-dispatcher safety (`SELECT … FOR UPDATE SKIP LOCKED` via `event.Outbox.Claim`)
 - [ ] Async event bus with retries and DLQ
-- [ ] Multi-dispatcher safety (`SELECT … FOR UPDATE SKIP LOCKED` in `LoadPending`)
 - [ ] Snapshotting (every N events, restore from latest)
 - [ ] Sagas / process managers for cross-aggregate workflows
 - [ ] Event upcasters for schema evolution

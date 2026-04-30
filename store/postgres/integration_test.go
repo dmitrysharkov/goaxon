@@ -95,10 +95,7 @@ func TestIntegrationRepositoryDispatcherFlow(t *testing.T) {
 	muRecv.Unlock()
 
 	// Outbox should hold both pending entries.
-	pending, err := store.LoadPending(context.Background(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pending := peekPending(t, store, 10)
 	if len(pending) != 2 {
 		t.Fatalf("outbox pending = %d, want 2", len(pending))
 	}
@@ -117,8 +114,7 @@ func TestIntegrationRepositoryDispatcherFlow(t *testing.T) {
 	}, "both events delivered via dispatcher")
 
 	waitFor(t, func() bool {
-		p, _ := store.LoadPending(context.Background(), 10)
-		return len(p) == 0
+		return len(peekPending(t, store, 10)) == 0
 	}, "outbox marked dispatched")
 
 	muRecv.Lock()

@@ -90,15 +90,23 @@ func (s *plainStore) Load(_ context.Context, id uuid.UUID) ([]event.Envelope, er
 }
 
 // outboxStore satisfies both event.Store and event.Outbox; it's a
-// plainStore plus the marker methods.
+// plainStore plus a no-op Claim — the test only cares that the
+// Repository sees the Outbox interface and skips synchronous publish.
 type outboxStore struct {
 	*plainStore
 }
 
 func newOutboxStore() *outboxStore { return &outboxStore{plainStore: newPlainStore()} }
 
-func (*outboxStore) LoadPending(context.Context, int) ([]event.OutboxEntry, error) { return nil, nil }
-func (*outboxStore) MarkDispatched(context.Context, []int64) error                 { return nil }
+func (*outboxStore) Claim(context.Context, int) (event.Claim, error) {
+	return emptyClaim{}, nil
+}
+
+type emptyClaim struct{}
+
+func (emptyClaim) Entries() []event.OutboxEntry             { return nil }
+func (emptyClaim) Commit(context.Context, []int64) error    { return nil }
+func (emptyClaim) Release(context.Context) error            { return nil }
 
 // --- tests ---
 

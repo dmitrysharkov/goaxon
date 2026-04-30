@@ -201,6 +201,22 @@ func TestAppendEmptyIsNoop(t *testing.T) {
 
 // --- Outbox tests ---
 
+// peekPending opens a Claim, reads its entries, and immediately
+// Releases. Used by tests as a non-mutating "what's currently pending?"
+// inspection (the production path is Claim → publish → Commit).
+func peekPending(t *testing.T, s *postgres.Store, batchSize int) []event.OutboxEntry {
+	t.Helper()
+	c, err := s.Claim(context.Background(), batchSize)
+	if err != nil {
+		t.Fatalf("peek claim: %v", err)
+	}
+	entries := append([]event.OutboxEntry(nil), c.Entries()...)
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("peek release: %v", err)
+	}
+	return entries
+}
+
 func TestAppendWritesOutboxRows(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
@@ -213,10 +229,7 @@ func TestAppendWritesOutboxRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pending, err := s.LoadPending(ctx, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pending := peekPending(t, s, 10)
 	if len(pending) != 2 {
 		t.Fatalf("got %d pending, want 2", len(pending))
 	}
@@ -228,7 +241,7 @@ func TestAppendWritesOutboxRows(t *testing.T) {
 	}
 }
 
-func TestMarkDispatchedRemovesFromPending(t *testing.T) {
+func TestClaimCommitMarksDispatched(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
@@ -239,22 +252,57 @@ func TestMarkDispatchedRemovesFromPending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pending, _ := s.LoadPending(ctx, 10)
-	ids := []int64{pending[0].OutboxID}
-	if err := s.MarkDispatched(ctx, ids); err != nil {
+	c, err := s.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := c.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("got %d, want 2", len(entries))
+	}
+	// Commit only the first; second stays pending.
+	if err := c.Commit(ctx, []int64{entries[0].OutboxID}); err != nil {
 		t.Fatal(err)
 	}
 
-	stillPending, _ := s.LoadPending(ctx, 10)
+	stillPending := peekPending(t, s, 10)
 	if len(stillPending) != 1 {
-		t.Fatalf("got %d pending after mark, want 1", len(stillPending))
+		t.Fatalf("got %d pending after commit, want 1", len(stillPending))
 	}
-	if stillPending[0].OutboxID != pending[1].OutboxID {
+	if stillPending[0].OutboxID != entries[1].OutboxID {
 		t.Fatalf("wrong entry remained: %+v", stillPending[0])
 	}
 }
 
-func TestLoadPendingRespectsBatchSize(t *testing.T) {
+func TestClaimReleaseDoesNotMark(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	if err := s.Append(ctx, cartID1, 0, []event.Envelope{
+		envelope(cartID1, 1, itemAdded{Name: "a", Qty: 1}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := s.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Entries()) != 1 {
+		t.Fatal("expected 1 entry")
+	}
+	if err := c.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// After release, the entry must still be claimable.
+	pending := peekPending(t, s, 10)
+	if len(pending) != 1 {
+		t.Fatalf("got %d pending after release, want 1", len(pending))
+	}
+}
+
+func TestClaimRespectsBatchSize(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
@@ -266,19 +314,111 @@ func TestLoadPendingRespectsBatchSize(t *testing.T) {
 		}
 	}
 
-	pending, err := s.LoadPending(ctx, 3)
+	c, err := s.Claim(ctx, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 3 {
-		t.Fatalf("got %d, want 3", len(pending))
+	defer c.Release(ctx)
+	if len(c.Entries()) != 3 {
+		t.Fatalf("got %d, want 3", len(c.Entries()))
 	}
 }
 
-func TestMarkDispatchedEmptyIsNoop(t *testing.T) {
+func TestClaimEmptyOutboxIsNoop(t *testing.T) {
 	s := newStore(t)
-	if err := s.MarkDispatched(context.Background(), nil); err != nil {
-		t.Fatalf("empty mark: %v", err)
+	c, err := s.Claim(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Entries()) != 0 {
+		t.Fatalf("got %d, want 0", len(c.Entries()))
+	}
+	// Both Commit and Release on an empty claim must succeed.
+	if err := c.Commit(context.Background(), nil); err != nil {
+		t.Fatalf("commit empty: %v", err)
+	}
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("release empty: %v", err)
+	}
+}
+
+// TestClaimSkipsLockedRows is the headline test for SKIP LOCKED:
+// two simultaneous Claims must see disjoint sets of entries.
+func TestClaimSkipsLockedRows(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 5; i++ {
+		if err := s.Append(ctx, cartID1, uint64(i-1), []event.Envelope{
+			envelope(cartID1, uint64(i), itemAdded{Name: "x", Qty: i}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := s.Claim(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release(ctx)
+	if len(first.Entries()) != 3 {
+		t.Fatalf("first claim got %d, want 3", len(first.Entries()))
+	}
+
+	// Second claim, while the first is still open, must skip the
+	// 3 locked rows and return only the remaining 2.
+	second, err := s.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release(ctx)
+	if len(second.Entries()) != 2 {
+		t.Fatalf("second claim got %d, want 2 (locked rows should be skipped)", len(second.Entries()))
+	}
+
+	seen := map[int64]bool{}
+	for _, e := range first.Entries() {
+		seen[e.OutboxID] = true
+	}
+	for _, e := range second.Entries() {
+		if seen[e.OutboxID] {
+			t.Fatalf("second claim saw locked entry %d", e.OutboxID)
+		}
+	}
+}
+
+// TestReleaseMakesRowsClaimableAgain proves the lock lifetime is bounded
+// by Commit/Release and not by the Postgres connection or Claim handle.
+func TestReleaseMakesRowsClaimableAgain(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		if err := s.Append(ctx, cartID1, uint64(i-1), []event.Envelope{
+			envelope(cartID1, uint64(i), itemAdded{Name: "x", Qty: i}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := s.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries()) != 3 {
+		t.Fatalf("first got %d, want 3", len(first.Entries()))
+	}
+	if err := first.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := s.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release(ctx)
+	if len(second.Entries()) != 3 {
+		t.Fatalf("after release, second claim got %d, want 3", len(second.Entries()))
 	}
 }
 
@@ -296,14 +436,22 @@ func TestAppendAtomicityOnFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	dispatched, _ := s.LoadPending(ctx, 10)
-	for _, e := range dispatched {
-		_ = s.MarkDispatched(ctx, []int64{e.OutboxID})
+	// Drain the outbox so the next failed append's leak (if any) shows up cleanly.
+	c, err := s.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 0, len(c.Entries()))
+	for _, e := range c.Entries() {
+		ids = append(ids, e.OutboxID)
+	}
+	if err := c.Commit(ctx, ids); err != nil {
+		t.Fatal(err)
 	}
 
 	// Second append: claims expectedVersion=1 (correct) but reuses sequence 1.
 	// First event in the batch will conflict with existing row.
-	err := s.Append(ctx, cartID1, 1, []event.Envelope{
+	err = s.Append(ctx, cartID1, 1, []event.Envelope{
 		envelope(cartID1, 1, itemAdded{Name: "b", Qty: 1}),
 	})
 	if !errors.Is(err, event.ErrConcurrencyConflict) {
@@ -311,7 +459,7 @@ func TestAppendAtomicityOnFailure(t *testing.T) {
 	}
 
 	// Outbox must not contain a "b" row from the failed tx.
-	pending, _ := s.LoadPending(ctx, 10)
+	pending := peekPending(t, s, 10)
 	if len(pending) != 0 {
 		t.Fatalf("found leaked outbox rows after failed append: %+v", pending)
 	}

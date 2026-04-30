@@ -96,12 +96,16 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 // (regardless of whether each publish succeeded). Returning zero on
 // errors lets Run back off rather than tight-loop on a broken DB.
 func (d *Dispatcher) tick(ctx context.Context) int {
-	entries, err := d.outbox.LoadPending(ctx, d.batchSize)
+	claim, err := d.outbox.Claim(ctx, d.batchSize)
 	if err != nil {
-		d.onError(ctx, fmt.Errorf("dispatcher: load pending: %w", err))
+		d.onError(ctx, fmt.Errorf("dispatcher: claim: %w", err))
 		return 0
 	}
+	entries := claim.Entries()
 	if len(entries) == 0 {
+		if err := claim.Release(ctx); err != nil {
+			d.onError(ctx, fmt.Errorf("dispatcher: release empty claim: %w", err))
+		}
 		return 0
 	}
 
@@ -115,12 +119,16 @@ func (d *Dispatcher) tick(ctx context.Context) int {
 		delivered = append(delivered, entry.OutboxID)
 	}
 
-	if len(delivered) > 0 {
-		if err := d.outbox.MarkDispatched(ctx, delivered); err != nil {
-			d.onError(ctx, fmt.Errorf("dispatcher: mark dispatched: %w", err))
-			// Don't return — the publishes already happened. Next tick
-			// will redeliver these entries; idempotent handlers absorb it.
+	// Release if nothing got through (so other dispatchers can retry
+	// without waiting); otherwise commit the successful subset.
+	if len(delivered) == 0 {
+		if err := claim.Release(ctx); err != nil {
+			d.onError(ctx, fmt.Errorf("dispatcher: release: %w", err))
 		}
+	} else if err := claim.Commit(ctx, delivered); err != nil {
+		d.onError(ctx, fmt.Errorf("dispatcher: commit: %w", err))
+		// The publishes happened; if commit failed the rows are still
+		// pending and will redeliver next tick — handlers must absorb it.
 	}
 	return len(entries)
 }

@@ -4,7 +4,7 @@ import "context"
 
 // OutboxEntry is a queued event row that has not yet been dispatched
 // to the bus. The OutboxID is the store's internal identifier and is
-// what MarkDispatched accepts; it has no domain meaning.
+// what Claim.Commit accepts; it has no domain meaning.
 type OutboxEntry struct {
 	OutboxID int64
 	Envelope Envelope
@@ -23,16 +23,36 @@ type OutboxEntry struct {
 // dissolves and you have the worst of both worlds.
 //
 // Delivery is at-least-once; handlers must be idempotent (a goaxon-wide
-// invariant — see CLAUDE.md). A single dispatcher is sufficient for v1.
-// Running several requires SELECT ... FOR UPDATE SKIP LOCKED in
-// LoadPending, which we have not added yet.
+// invariant — see CLAUDE.md). Multiple dispatchers can run safely
+// against the same Outbox: Claim's contract is that an entry returned
+// to one caller will not be returned to another until Released.
 type Outbox interface {
-	// LoadPending returns up to batchSize undispatched entries in
-	// insertion order. An empty slice means the queue is drained.
-	LoadPending(ctx context.Context, batchSize int) ([]OutboxEntry, error)
+	// Claim opens a session that exclusively owns up to batchSize
+	// pending entries. Returned entries are invisible to other Claim
+	// calls until the claim is committed or released. The empty case
+	// (no pending entries) returns a Claim whose Entries() is empty
+	// and whose Commit/Release are no-ops; the caller still must call
+	// one of them.
+	Claim(ctx context.Context, batchSize int) (Claim, error)
+}
 
-	// MarkDispatched flags the listed entries as published. Implementations
-	// are expected to set a dispatched_at timestamp rather than delete
-	// rows, so retention/audit is the operator's choice.
-	MarkDispatched(ctx context.Context, outboxIDs []int64) error
+// Claim is an in-flight processing handle for a batch of outbox
+// entries. While a Claim is open, other Outbox.Claim calls will skip
+// its entries (the Postgres implementation uses SELECT … FOR UPDATE
+// SKIP LOCKED). Always end a Claim with Commit or Release — leaking
+// one ties up a backend connection until the process dies.
+type Claim interface {
+	// Entries returns the locked entries in insertion order. The slice
+	// is stable for the lifetime of the claim.
+	Entries() []OutboxEntry
+
+	// Commit marks the listed entries dispatched and releases the
+	// lock. dispatchedIDs must be a subset of Entries(); pass an empty
+	// slice to release the lock without marking anything (useful when
+	// every publish in the batch failed).
+	Commit(ctx context.Context, dispatchedIDs []int64) error
+
+	// Release abandons the claim without marking anything dispatched.
+	// The entries become available for re-claim by any dispatcher.
+	Release(ctx context.Context) error
 }
