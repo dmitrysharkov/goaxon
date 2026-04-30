@@ -20,8 +20,8 @@ goaxon/
     └── orders/     End-to-end demo: place + ship an order, project a read model
 ```
 
-Module: `github.com/example/goaxon` (placeholder; rename when publishing).
-Go version: 1.22+.
+Module: `github.com/dmitrysharkov/goaxon` (placeholder; rename when publishing).
+Go version: 1.26.
 
 ---
 
