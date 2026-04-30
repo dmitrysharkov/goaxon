@@ -216,6 +216,37 @@ into a VO and accumulates failures. Adapters depend on `app` only —
 they don't import `domain` for parsers. This is the structural win:
 every adapter (HTTP, gRPC, CLI, queue consumer) sees the same shape.
 
+### Events are immutable facts; replay trusts them
+Adding `UnmarshalJSON`-with-parsing on VOs (`Customer.UnmarshalJSON`
+calls `ParseCustomer`, etc.) seems like an obvious defense — "what
+if `Amount: -5` ends up in the database?" — and we deliberately
+**don't** do it.
+
+Events are facts. They happened. They're not subject to current
+validation rules. If `Customer`'s minimum length tightens from 1 to
+3 characters in v2, old `"x"` customer events must still replay —
+that history actually happened. Re-running today's parsers at read
+time retroactively re-judges events against rules they were never
+judged by. That breaks event sourcing.
+
+Where invariants belong, by layer:
+
+| Concern                | Where it belongs                                                |
+|------------------------|-----------------------------------------------------------------|
+| Write-time invariants  | VOs' `Parse*` / `Make*From*` at the app boundary                |
+| Read-time invariants   | None — events are facts, replay trusts them                     |
+| Storage immutability   | DB-level (events table INSERT/SELECT-only, revoke UPDATE/DELETE)|
+| Schema evolution       | Upcasters (separate concept, on the roadmap)                    |
+
+Practically: JSON marshaling of `type Customer string` and `type
+Amount int` works out of the box; we don't add custom
+`UnmarshalJSON`. The "what if data corruption?" threat lives at the
+same layer as "what if someone `DROP TABLE events`?" — an
+ops/deployment concern enforced by Postgres permissions and triggers,
+not framework code. Don't propose `UnmarshalJSON`-with-validation
+again — we discussed it, and the read-time re-judging breaks event
+sourcing semantics.
+
 ### Validation helper
 `goaxon/validation` is a small framework-level package for the
 parse-don't-validate pattern at the app boundary. Generic over input
@@ -314,6 +345,7 @@ These are documented gaps, not things to fix without discussion:
 - [ ] Sagas / process managers for cross-aggregate workflows
 - [ ] Event upcasters for schema evolution
 - [ ] gRPC layer for remote command/query dispatch
+- [ ] User-facing manual (Diataxis: tutorial, how-to, reference, explanation) — start when the API stabilises for a few sessions, or when someone outside the project asks "how do I use this?"
 
 ---
 

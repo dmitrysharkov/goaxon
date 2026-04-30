@@ -82,6 +82,29 @@ go test ./...
 - **Black-box aggregate tests.** `aggregate/aggregatetest` provides a Given/When/Then harness using only the aggregate's public surface — no internals of `Base` are exposed to support testing.
 - **`context.Context` everywhere.** Cancellation, deadlines, and tracing flow through every dispatch.
 
+## Where invariants live
+
+A common reflex when reading the orders example is "shouldn't we add
+`UnmarshalJSON` to `Customer` / `Amount` so corrupt data in the
+database fails loudly on replay?" — we deliberately don't, because
+re-running today's parser at replay time retroactively re-judges
+events against rules they were never judged by. Events are facts; if
+`Customer`'s rules tighten in v2, the v1 events that wrote `"x"` are
+still part of history.
+
+| Concern                | Where it belongs                                                |
+|------------------------|-----------------------------------------------------------------|
+| Write-time invariants  | VOs' `Parse*` / `Make*From*` at the app boundary                |
+| Read-time invariants   | None — events are facts, replay trusts them                     |
+| Storage immutability   | DB-level (events table INSERT/SELECT-only, revoke UPDATE/DELETE)|
+| Schema evolution       | Upcasters (separate concept, on the roadmap)                    |
+
+In practice: `type Customer string` and `type Amount int` round-trip
+through `encoding/json` with no custom code; the framework stays
+small. The "what if `Amount: -5` ends up in the database?" threat
+lives at the same layer as "what if someone `DROP TABLE events`?"
+— it's an ops/deployment concern, not framework code.
+
 ## Known limitations
 
 These are intentional gaps, called out so they don't surprise you:
@@ -100,3 +123,4 @@ These are intentional gaps, called out so they don't surprise you:
 - [ ] Sagas / process managers for cross-aggregate workflows
 - [ ] Event upcasters for schema evolution
 - [ ] gRPC layer for remote command/query dispatch
+- [ ] User-facing manual — tutorial, how-to guides, deeper architecture explanation
