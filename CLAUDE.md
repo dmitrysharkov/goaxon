@@ -20,8 +20,15 @@ goaxon/
 ├── internal/
 │   └── pgtest/     Embedded-postgres + pgtestdb harness used by tests
 └── examples/
-    └── orders/     End-to-end demo: place + ship an order, project a read model
+    ├── orders/         In-process driver against the orders domain
+    │   └── domain/     Shared orders core (commands, events, aggregate, projection, Wire)
+    └── orders-http/    HTTP driver (chi) against the same domain
 ```
+
+The two `examples/orders*` binaries deliberately share the same
+`examples/orders/domain` package — they're hexagonal-style *driving
+adapters* against one application core. New transport layers (gRPC,
+queues, CLIs) belong as siblings, not as forks of the domain.
 
 Module: `github.com/dmitrysharkov/goaxon` (placeholder; rename when publishing).
 Go version: 1.26.

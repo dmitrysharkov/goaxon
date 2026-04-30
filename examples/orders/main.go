@@ -1,240 +1,51 @@
-// Package main shows goaxon in action with a small order-management
-// domain. We define commands, events, an aggregate, and a read-model
-// projection — then exercise them end-to-end.
+// Package main shows goaxon driving the orders domain in-process: no
+// HTTP, no DB, just direct command/query dispatch. The aggregate,
+// commands, events, and projection live in ./domain — see also the
+// HTTP demo at ../orders-http for a different driving adapter against
+// the same core.
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sync"
 
-	"github.com/dmitrysharkov/goaxon/aggregate"
 	"github.com/dmitrysharkov/goaxon/command"
-	"github.com/dmitrysharkov/goaxon/event"
+	"github.com/dmitrysharkov/goaxon/examples/orders/domain"
 	"github.com/dmitrysharkov/goaxon/query"
 	"github.com/dmitrysharkov/goaxon/store/memory"
 	"github.com/google/uuid"
 )
 
-// ---------- Commands ----------
-
-type PlaceOrder struct {
-	OrderID  uuid.UUID
-	Customer string
-	Amount   int // cents
-}
-
-func (PlaceOrder) CommandType() string { return "PlaceOrder" }
-
-type ShipOrder struct {
-	OrderID uuid.UUID
-}
-
-func (ShipOrder) CommandType() string { return "ShipOrder" }
-
-// ---------- Events ----------
-
-type OrderPlaced struct {
-	Customer string
-	Amount   int
-}
-
-func (OrderPlaced) EventType() string { return "OrderPlaced" }
-
-type OrderShipped struct{}
-
-func (OrderShipped) EventType() string { return "OrderShipped" }
-
-// ---------- Aggregate ----------
-
-type orderStatus int
-
-const (
-	statusNew orderStatus = iota
-	statusPlaced
-	statusShipped
-)
-
-type Order struct {
-	*aggregate.Base
-	customer string
-	amount   int
-	status   orderStatus
-}
-
-func (Order) AggregateType() string { return "Order" }
-
-// newOrder is the factory the repository uses when loading or creating.
-func newOrder(id uuid.UUID) *Order {
-	o := &Order{Base: &aggregate.Base{}}
-	_ = o.SetID(id)
-	return o
-}
-
-// Apply mutates state in response to events. Pure and deterministic.
-func (o *Order) Apply(e event.Event) {
-	switch ev := e.(type) {
-	case OrderPlaced:
-		o.customer = ev.Customer
-		o.amount = ev.Amount
-		o.status = statusPlaced
-	case OrderShipped:
-		o.status = statusShipped
-	}
-}
-
-// Place is invoked by the PlaceOrder command handler. It validates,
-// then raises the event — which both updates state and queues it for
-// persistence.
-func (o *Order) Place(customer string, amount int) error {
-	if o.status != statusNew {
-		return errors.New("order already placed")
-	}
-	if amount <= 0 {
-		return errors.New("amount must be positive")
-	}
-	o.Raise(o, OrderPlaced{Customer: customer, Amount: amount})
-	return nil
-}
-
-func (o *Order) Ship() error {
-	switch o.status {
-	case statusNew:
-		return errors.New("cannot ship an order that hasn't been placed")
-	case statusShipped:
-		return errors.New("order already shipped")
-	}
-	o.Raise(o, OrderShipped{})
-	return nil
-}
-
-// ---------- Read model (projection) ----------
-
-// OrderSummary is the read-model row built from events.
-type OrderSummary struct {
-	OrderID  uuid.UUID
-	Customer string
-	Amount   int
-	Shipped  bool
-}
-
-// summaryProjection is a thread-safe map keyed by order ID. In a real
-// system this would back onto a SQL table or a key-value store.
-type summaryProjection struct {
-	mu      sync.RWMutex
-	records map[uuid.UUID]OrderSummary
-}
-
-func newSummaryProjection() *summaryProjection {
-	return &summaryProjection{records: make(map[uuid.UUID]OrderSummary)}
-}
-
-func (p *summaryProjection) onOrderPlaced(_ context.Context, env event.Envelope) error {
-	ev := env.Payload.(OrderPlaced)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.records[env.AggregateID] = OrderSummary{
-		OrderID:  env.AggregateID,
-		Customer: ev.Customer,
-		Amount:   ev.Amount,
-	}
-	return nil
-}
-
-func (p *summaryProjection) onOrderShipped(_ context.Context, env event.Envelope) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rec := p.records[env.AggregateID]
-	rec.Shipped = true
-	p.records[env.AggregateID] = rec
-	return nil
-}
-
-// ---------- Queries ----------
-
-type GetOrderSummary struct {
-	OrderID uuid.UUID
-}
-
-func (GetOrderSummary) QueryType() string { return "GetOrderSummary" }
-
-// ---------- Wiring & demo ----------
-
 func main() {
 	ctx := context.Background()
 
-	// Infrastructure
+	// Infrastructure (in-memory)
 	store := memory.NewStore()
 	eventBus := memory.NewBus()
 	commandBus := command.New()
 	queryBus := query.New()
 
-	// Aggregate repository
-	orderRepo := aggregate.NewRepository[*Order](store, eventBus, newOrder)
+	// Application: register handlers and projection against the buses.
+	domain.Wire(commandBus, queryBus, eventBus, store)
 
-	// Read-side projection
-	summary := newSummaryProjection()
-	eventBus.Subscribe("OrderPlaced", summary.onOrderPlaced)
-	eventBus.Subscribe("OrderShipped", summary.onOrderShipped)
-
-	// Command handlers
-	command.Register(commandBus, func(ctx context.Context, cmd PlaceOrder) (struct{}, error) {
-		o, err := orderRepo.Load(ctx, cmd.OrderID)
-		if err != nil {
-			return struct{}{}, err
-		}
-		if o.AggregateID() == uuid.Nil {
-			o = newOrder(cmd.OrderID)
-		}
-		if err := o.Place(cmd.Customer, cmd.Amount); err != nil {
-			return struct{}{}, err
-		}
-		return struct{}{}, orderRepo.Save(ctx, o)
-	})
-
-	command.Register(commandBus, func(ctx context.Context, cmd ShipOrder) (struct{}, error) {
-		o, err := orderRepo.Load(ctx, cmd.OrderID)
-		if err != nil {
-			return struct{}{}, err
-		}
-		if err := o.Ship(); err != nil {
-			return struct{}{}, err
-		}
-		return struct{}{}, orderRepo.Save(ctx, o)
-	})
-
-	// Query handler
-	query.Register(queryBus, func(_ context.Context, q GetOrderSummary) (OrderSummary, error) {
-		summary.mu.RLock()
-		defer summary.mu.RUnlock()
-		rec, ok := summary.records[q.OrderID]
-		if !ok {
-			return OrderSummary{}, fmt.Errorf("order %s not found", q.OrderID)
-		}
-		return rec, nil
-	})
-
-	// Drive it. UUIDv7 is recommended for aggregate IDs — its time-ordered
-	// prefix gives stores like Postgres better B-tree locality on the
-	// events table.
+	// Drive it. UUIDv7 gets time-ordered prefixes — better B-tree
+	// locality if you swap the in-memory store for Postgres.
 	orderID := uuid.Must(uuid.NewV7())
-	if _, err := command.Send[PlaceOrder, struct{}](ctx, commandBus, PlaceOrder{
+	if _, err := command.Send[domain.PlaceOrder, struct{}](ctx, commandBus, domain.PlaceOrder{
 		OrderID: orderID, Customer: "Alice", Amount: 4200,
 	}); err != nil {
 		panic(err)
 	}
-	if _, err := command.Send[ShipOrder, struct{}](ctx, commandBus, ShipOrder{OrderID: orderID}); err != nil {
+	if _, err := command.Send[domain.ShipOrder, struct{}](ctx, commandBus, domain.ShipOrder{OrderID: orderID}); err != nil {
 		panic(err)
 	}
 
-	got, err := query.Ask[GetOrderSummary, OrderSummary](ctx, queryBus, GetOrderSummary{OrderID: orderID})
+	got, err := query.Ask[domain.GetOrderSummary, domain.OrderSummary](ctx, queryBus, domain.GetOrderSummary{OrderID: orderID})
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("Order summary: %+v\n", got)
 
-	// And verify the underlying event stream
 	envs, _ := store.Load(ctx, orderID)
 	fmt.Printf("Stored %d events:\n", len(envs))
 	for _, env := range envs {
