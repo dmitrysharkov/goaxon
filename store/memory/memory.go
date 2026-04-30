@@ -6,6 +6,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/dmitrysharkov/goaxon/event"
@@ -60,8 +61,9 @@ func (s *Store) Load(ctx context.Context, aggregateID uuid.UUID) ([]event.Envelo
 }
 
 // Bus is an in-memory event bus that delivers events synchronously to
-// every subscribed handler. Errors from handlers are collected; the
-// first non-nil error is returned and remaining handlers still run.
+// every subscribed handler. Every handler is run regardless of earlier
+// failures; non-nil errors are combined via errors.Join, so callers
+// can still use errors.Is/As to inspect any of them.
 //
 // "Synchronous" makes failures easy to test and reason about. A
 // production setup would typically use an async bus with retries and
@@ -90,11 +92,11 @@ func (b *Bus) Publish(ctx context.Context, env event.Envelope) error {
 	handlers := append([]event.Handler(nil), b.handlers[env.Payload.EventType()]...)
 	b.mu.RUnlock()
 
-	var firstErr error
+	var errs []error
 	for _, h := range handlers {
-		if err := h(ctx, env); err != nil && firstErr == nil {
-			firstErr = err
+		if err := h(ctx, env); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
