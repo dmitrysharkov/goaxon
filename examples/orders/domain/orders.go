@@ -27,6 +27,7 @@ import (
 	"github.com/dmitrysharkov/goaxon/aggregate"
 	"github.com/dmitrysharkov/goaxon/command"
 	"github.com/dmitrysharkov/goaxon/event"
+	"github.com/dmitrysharkov/goaxon/maybe"
 	"github.com/dmitrysharkov/goaxon/query"
 	"github.com/google/uuid"
 )
@@ -101,12 +102,30 @@ func MakeAmountFromCents(cents int) (Amount, error) {
 // Cents returns the amount as an integer cent value.
 func (a Amount) Cents() int { return int(a) }
 
+// Notes is an optional free-text note on an order. When present it
+// must be non-empty and at most 500 characters. "Optional" means the
+// note can be absent, not that an empty value is valid — absence is
+// represented by maybe.None[Notes]() in the surrounding fields.
+type Notes string
+
+func ParseNotes(s string) (Notes, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", errors.New("must not be empty")
+	}
+	if len(s) > 500 {
+		return "", errors.New("must be at most 500 characters")
+	}
+	return Notes(s), nil
+}
+
 // ---------- Commands ----------
 
 type PlaceOrder struct {
 	OrderID      OrderID
 	CustomerName CustomerName
 	Amount       Amount
+	Notes        maybe.Maybe[Notes]
 }
 
 func (PlaceOrder) CommandType() string { return "PlaceOrder" }
@@ -125,8 +144,9 @@ func (ShipOrder) CommandType() string { return "ShipOrder" }
 // to event SHAPE, not just field values.
 
 type OrderPlaced struct {
-	CustomerName CustomerName `json:"customer_name"`
-	Amount       Amount       `json:"amount"`
+	CustomerName CustomerName       `json:"customer_name"`
+	Amount       Amount             `json:"amount"`
+	Notes        maybe.Maybe[Notes] `json:"notes"`
 }
 
 func (OrderPlaced) EventType() string { return "OrderPlaced" }
@@ -177,12 +197,12 @@ func (o *Order) Apply(e event.Event) {
 
 // Place raises OrderPlaced if the order is new. The VOs are already
 // valid by construction, so the only check left here is the state
-// transition.
-func (o *Order) Place(name CustomerName, amount Amount) error {
+// transition. Notes is optional — pass maybe.None[Notes]() if absent.
+func (o *Order) Place(name CustomerName, amount Amount, notes maybe.Maybe[Notes]) error {
 	if o.status != statusNew {
 		return errors.New("order already placed")
 	}
-	o.Raise(o, OrderPlaced{CustomerName: name, Amount: amount})
+	o.Raise(o, OrderPlaced{CustomerName: name, Amount: amount, Notes: notes})
 	return nil
 }
 
@@ -202,10 +222,11 @@ func (o *Order) Ship() error {
 
 // OrderSummary is the read-model row built from events.
 type OrderSummary struct {
-	OrderID      OrderID      `json:"order_id"`
-	CustomerName CustomerName `json:"customer_name"`
-	Amount       Amount       `json:"amount"`
-	Shipped      bool         `json:"shipped"`
+	OrderID      OrderID            `json:"order_id"`
+	CustomerName CustomerName       `json:"customer_name"`
+	Amount       Amount             `json:"amount"`
+	Notes        maybe.Maybe[Notes] `json:"notes"`
+	Shipped      bool               `json:"shipped"`
 }
 
 // SummaryProjection is a thread-safe map keyed by order ID, populated
@@ -228,6 +249,7 @@ func (p *SummaryProjection) OnOrderPlaced(_ context.Context, env event.Envelope)
 		OrderID:      OrderID(env.AggregateID),
 		CustomerName: ev.CustomerName,
 		Amount:       ev.Amount,
+		Notes:        ev.Notes,
 	}
 	return nil
 }
@@ -290,7 +312,7 @@ func Wire(
 		case err != nil:
 			return struct{}{}, err
 		}
-		if err := o.Place(cmd.CustomerName, cmd.Amount); err != nil {
+		if err := o.Place(cmd.CustomerName, cmd.Amount, cmd.Notes); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, repo.Save(ctx, o)

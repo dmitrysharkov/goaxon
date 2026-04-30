@@ -77,6 +77,54 @@ func TestPlaceOrderInvalidAmount(t *testing.T) {
 	}
 }
 
+func TestPlaceOrderWithOptionalNotes(t *testing.T) {
+	s := newServer()
+	w := do(t, s, "POST", "/orders",
+		`{"customer_name":"Alice","amount":4200,"notes":"ring twice"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("place status %d, body=%s", w.Code, w.Body.String())
+	}
+	id := decode[placeOrderResponse](t, w).OrderID
+
+	w = do(t, s, "GET", "/orders/"+id, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status %d", w.Code)
+	}
+	got := decode[map[string]any](t, w)
+	if got["notes"] != "ring twice" {
+		t.Fatalf("notes=%v want \"ring twice\"", got["notes"])
+	}
+}
+
+func TestPlaceOrderNotesAbsentSerializesAsNull(t *testing.T) {
+	s := newServer()
+	w := do(t, s, "POST", "/orders", `{"customer_name":"Alice","amount":4200}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("place status %d, body=%s", w.Code, w.Body.String())
+	}
+	id := decode[placeOrderResponse](t, w).OrderID
+
+	w = do(t, s, "GET", "/orders/"+id, "")
+	got := decode[map[string]any](t, w)
+	// JSON null in Go map[string]any is nil.
+	if got["notes"] != nil {
+		t.Fatalf("notes=%v want null", got["notes"])
+	}
+}
+
+func TestPlaceOrderEmptyNotesIs422(t *testing.T) {
+	s := newServer()
+	w := do(t, s, "POST", "/orders",
+		`{"customer_name":"Alice","amount":4200,"notes":""}`)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422", w.Code)
+	}
+	body := decode[map[string]map[string]string](t, w)
+	if _, ok := body["errors"]["notes"]; !ok {
+		t.Fatalf("missing notes field error: %+v", body)
+	}
+}
+
 func TestPlaceOrderMultipleValidationErrors(t *testing.T) {
 	s := newServer()
 	w := do(t, s, "POST", "/orders", `{"customer_name":"","amount":-5}`)

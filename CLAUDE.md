@@ -16,6 +16,7 @@ goaxon/
 ├── command/        Type-safe command bus (generics-based)
 ├── query/          Type-safe query bus (generics-based)
 ├── validation/     Generic Validator + ValidationError for app-layer parse-don't-validate
+├── maybe/          Generic Maybe[T] (Some / None) for optional VO fields
 ├── store/
 │   ├── memory/     In-memory Store and Bus implementations
 │   └── postgres/   Postgres-backed Store with transactional outbox (pgx/v5)
@@ -246,6 +247,30 @@ ops/deployment concern enforced by Postgres permissions and triggers,
 not framework code. Don't propose `UnmarshalJSON`-with-validation
 again — we discussed it, and the read-time re-judging breaks event
 sourcing semantics.
+
+### Optional VOs use `maybe.Maybe[T]`, not `*T`
+For fields that are genuinely optional in the domain (the orders
+example has an optional `Notes` on each order), wrap in
+`maybe.Maybe[T]` rather than using `*T`. Reasons:
+
+- `Maybe[T]` makes "absent" an explicit, value-typed state. `*T`
+  conflates absence with pointer-aliasing semantics callers usually
+  don't want.
+- `*T` of a VO can panic on nil-deref if a downstream layer forgets
+  to check; `Maybe[T].Get()` returns the zero value with `ok=false`
+  — same comma-ok idiom as map/channel reads.
+- JSON marshaling: `Maybe[T]` serializes as `null` for None and as
+  the value for Some, symmetric on unmarshal. `*T` works similarly
+  for JSON but loses the value-semantics property above.
+- The functor methods (`Map`, `FlatMap`) live as free functions in
+  the `maybe` package because Go doesn't allow generic methods on
+  non-generic types — same reason `validation.Field` is a function,
+  not a method.
+
+At the *adapter* boundary, the optional input still uses `*string`
+in the request struct (idiomatic Go for optional JSON fields). The
+app layer turns `*string` into `Maybe[T]` after parsing — that's
+the parse-don't-validate boundary doing its job.
 
 ### Validation helper
 `goaxon/validation` is a small framework-level package for the

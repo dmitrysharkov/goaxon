@@ -28,7 +28,8 @@ func main() {
 	// Drive it through the typed service using only standard Go
 	// types — strings/ints. The app layer parses these into VOs
 	// (Customer, Amount, UUID) before dispatching commands.
-	id, err := orders.PlaceOrder(ctx, "Alice", 4200)
+	note := "Please ring the doorbell twice."
+	id, err := orders.PlaceOrder(ctx, "Alice", 4200, &note)
 	if err != nil {
 		panic(err)
 	}

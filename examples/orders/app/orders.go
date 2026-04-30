@@ -14,6 +14,7 @@ import (
 	"github.com/dmitrysharkov/goaxon/command"
 	"github.com/dmitrysharkov/goaxon/event"
 	"github.com/dmitrysharkov/goaxon/examples/orders/domain"
+	"github.com/dmitrysharkov/goaxon/maybe"
 	"github.com/dmitrysharkov/goaxon/query"
 	"github.com/dmitrysharkov/goaxon/validation"
 )
@@ -47,17 +48,31 @@ func New(events event.Bus, store event.Store) *Orders {
 // dispatches the PlaceOrder command. Returns the new order's ID
 // (as a string for adapter convenience) on success, or a
 // *validation.Error if any input failed to parse.
-func (o *Orders) PlaceOrder(ctx context.Context, customerName string, amount int) (string, error) {
+//
+// note is optional: pass nil for "no note." A non-nil pointer is
+// parsed as a domain.Notes VO; an empty *note string is rejected
+// (use nil instead). The optional field is carried through the rest
+// of the stack as maybe.Maybe[domain.Notes].
+func (o *Orders) PlaceOrder(ctx context.Context, customerName string, amount int, note *string) (string, error) {
 	v := validation.New()
 	name := validation.Field(v, "customer_name", domain.ParseCustomerName, customerName)
 	amt := validation.Field(v, "amount", domain.MakeAmountFromCents, amount)
+
+	notes := maybe.None[domain.Notes]()
+	if note != nil {
+		parsed := validation.Field(v, "notes", domain.ParseNotes, *note)
+		if v.Err() == nil {
+			notes = maybe.Some(parsed)
+		}
+	}
+
 	if err := v.Err(); err != nil {
 		return "", err
 	}
 
 	id := domain.NewOrderID()
 	if _, err := command.Send[domain.PlaceOrder, struct{}](ctx, o.commands,
-		domain.PlaceOrder{OrderID: id, CustomerName: name, Amount: amt},
+		domain.PlaceOrder{OrderID: id, CustomerName: name, Amount: amt, Notes: notes},
 	); err != nil {
 		return "", err
 	}

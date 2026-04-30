@@ -21,7 +21,7 @@ func freshID() string { return uuid.Must(uuid.NewV7()).String() }
 
 func TestPlaceOrder(t *testing.T) {
 	orders := newApp(t)
-	id, err := orders.PlaceOrder(context.Background(), "Alice", 4200)
+	id, err := orders.PlaceOrder(context.Background(), "Alice", 4200, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestPlaceOrder(t *testing.T) {
 
 func TestPlaceOrderValidationErrors(t *testing.T) {
 	orders := newApp(t)
-	_, err := orders.PlaceOrder(context.Background(), "", 0)
+	_, err := orders.PlaceOrder(context.Background(), "", 0, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -51,9 +51,55 @@ func TestPlaceOrderValidationErrors(t *testing.T) {
 	}
 }
 
+func TestPlaceOrderWithNotesSucceeds(t *testing.T) {
+	orders := newApp(t)
+	note := "leave at the gate"
+	id, err := orders.PlaceOrder(context.Background(), "Alice", 4200, &note)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := orders.GetOrder(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := summary.Notes.Get()
+	if !ok || string(got) != "leave at the gate" {
+		t.Fatalf("Notes got (%q, %v), want (\"leave at the gate\", true)", got, ok)
+	}
+}
+
+func TestPlaceOrderWithEmptyNoteIsValidationError(t *testing.T) {
+	orders := newApp(t)
+	empty := ""
+	_, err := orders.PlaceOrder(context.Background(), "Alice", 4200, &empty)
+	var verr *validation.Error
+	if !errors.As(err, &verr) {
+		t.Fatalf("got %T, want *validation.Error", err)
+	}
+	if _, ok := verr.Fields["notes"]; !ok {
+		t.Fatalf("missing notes field error: %+v", verr.Fields)
+	}
+}
+
+func TestPlaceOrderWithoutNotesIsNone(t *testing.T) {
+	orders := newApp(t)
+	id, err := orders.PlaceOrder(context.Background(), "Alice", 4200, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := orders.GetOrder(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Notes.IsSome() {
+		t.Fatalf("expected None, got Some(%v)", summary.Notes)
+	}
+}
+
 func TestPlaceOrderInvalidAmountOnly(t *testing.T) {
 	orders := newApp(t)
-	_, err := orders.PlaceOrder(context.Background(), "Alice", 0)
+	_, err := orders.PlaceOrder(context.Background(), "Alice", 0, nil)
 	var verr *validation.Error
 	if !errors.As(err, &verr) {
 		t.Fatalf("got %T, want *ValidationError", err)
@@ -86,7 +132,7 @@ func TestShipBadIDReturnsValidationError(t *testing.T) {
 func TestShipPlacedOrder(t *testing.T) {
 	orders := newApp(t)
 	ctx := context.Background()
-	id, err := orders.PlaceOrder(ctx, "Alice", 4200)
+	id, err := orders.PlaceOrder(ctx, "Alice", 4200, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +144,7 @@ func TestShipPlacedOrder(t *testing.T) {
 func TestShipTwiceFailsButNotAsNotFound(t *testing.T) {
 	orders := newApp(t)
 	ctx := context.Background()
-	id, _ := orders.PlaceOrder(ctx, "Alice", 4200)
+	id, _ := orders.PlaceOrder(ctx, "Alice", 4200, nil)
 	if err := orders.ShipOrder(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +181,7 @@ func TestGetOrderBadIDReturnsValidationError(t *testing.T) {
 func TestGetOrderAfterPlace(t *testing.T) {
 	orders := newApp(t)
 	ctx := context.Background()
-	id, err := orders.PlaceOrder(ctx, "Alice", 4200)
+	id, err := orders.PlaceOrder(ctx, "Alice", 4200, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +200,7 @@ func TestGetOrderAfterPlace(t *testing.T) {
 func TestGetOrderAfterShip(t *testing.T) {
 	orders := newApp(t)
 	ctx := context.Background()
-	id, err := orders.PlaceOrder(ctx, "Alice", 100)
+	id, err := orders.PlaceOrder(ctx, "Alice", 100, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
