@@ -5,15 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 )
 
-// do is a tiny helper that runs a request through the server and
-// returns the recorder. Each test gets a fresh server so state is
-// isolated.
+// do runs a request through the server and returns the recorder.
+// Each test gets a fresh server so state is isolated.
 func do(t *testing.T, server http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rdr *bytes.Reader
@@ -48,8 +46,11 @@ func TestPlaceOrder(t *testing.T) {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
 	}
 	resp := decode[placeOrderResponse](t, w)
-	if resp.OrderID == uuid.Nil {
-		t.Fatal("expected non-nil order_id")
+	if resp.OrderID == "" {
+		t.Fatal("expected non-empty order_id")
+	}
+	if _, err := uuid.Parse(resp.OrderID); err != nil {
+		t.Fatalf("order_id is not a valid UUID: %v", err)
 	}
 }
 
@@ -64,26 +65,49 @@ func TestPlaceOrderBadJSON(t *testing.T) {
 func TestPlaceOrderInvalidAmount(t *testing.T) {
 	s := newServer()
 	w := do(t, s, "POST", "/orders", `{"customer":"Alice","amount":0}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400 (domain rejected amount=0)", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "amount must be positive") {
-		t.Fatalf("expected domain error message, got %s", w.Body.String())
+	body := decode[map[string]map[string]string](t, w)
+	if _, ok := body["errors"]["amount"]; !ok {
+		t.Fatalf("missing amount field error: %+v", body)
+	}
+	if _, ok := body["errors"]["customer"]; ok {
+		t.Fatalf("unexpected customer error (only amount was bad): %+v", body)
+	}
+}
+
+func TestPlaceOrderMultipleValidationErrors(t *testing.T) {
+	s := newServer()
+	w := do(t, s, "POST", "/orders", `{"customer":"","amount":-5}`)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422", w.Code)
+	}
+	body := decode[map[string]map[string]string](t, w)
+	if _, ok := body["errors"]["amount"]; !ok {
+		t.Fatalf("missing amount field error: %+v", body)
+	}
+	if _, ok := body["errors"]["customer"]; !ok {
+		t.Fatalf("missing customer field error: %+v", body)
 	}
 }
 
 func TestShipOrderBadID(t *testing.T) {
 	s := newServer()
 	w := do(t, s, "POST", "/orders/not-a-uuid/ship", "")
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422 (id failed to parse)", w.Code)
+	}
+	body := decode[map[string]map[string]string](t, w)
+	if _, ok := body["errors"]["id"]; !ok {
+		t.Fatalf("missing id field error: %+v", body)
 	}
 }
 
 func TestShipOrderUnknownID(t *testing.T) {
 	s := newServer()
-	id := uuid.Must(uuid.NewV7())
-	w := do(t, s, "POST", "/orders/"+id.String()+"/ship", "")
+	id := uuid.Must(uuid.NewV7()).String()
+	w := do(t, s, "POST", "/orders/"+id+"/ship", "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status %d, want 404 (no such order stream)", w.Code)
 	}
@@ -100,13 +124,13 @@ func TestPlaceThenShipThenGet(t *testing.T) {
 	id := decode[placeOrderResponse](t, w).OrderID
 
 	// Ship
-	w = do(t, s, "POST", "/orders/"+id.String()+"/ship", "")
+	w = do(t, s, "POST", "/orders/"+id+"/ship", "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("ship status %d, body=%s", w.Code, w.Body.String())
 	}
 
 	// Get
-	w = do(t, s, "GET", "/orders/"+id.String(), "")
+	w = do(t, s, "GET", "/orders/"+id, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("get status %d, body=%s", w.Code, w.Body.String())
 	}
@@ -121,8 +145,8 @@ func TestPlaceThenShipThenGet(t *testing.T) {
 
 func TestGetOrderNotFound(t *testing.T) {
 	s := newServer()
-	id := uuid.Must(uuid.NewV7())
-	w := do(t, s, "GET", "/orders/"+id.String(), "")
+	id := uuid.Must(uuid.NewV7()).String()
+	w := do(t, s, "GET", "/orders/"+id, "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status %d, want 404", w.Code)
 	}
@@ -131,7 +155,7 @@ func TestGetOrderNotFound(t *testing.T) {
 func TestGetOrderBadID(t *testing.T) {
 	s := newServer()
 	w := do(t, s, "GET", "/orders/nope", "")
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422", w.Code)
 	}
 }

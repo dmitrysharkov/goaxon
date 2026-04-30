@@ -15,6 +15,7 @@ goaxon/
 │   └── aggregatetest/  Given/When/Then black-box harness for aggregate unit tests
 ├── command/        Type-safe command bus (generics-based)
 ├── query/          Type-safe query bus (generics-based)
+├── validation/     Generic Validator + ValidationError for app-layer parse-don't-validate
 ├── store/
 │   ├── memory/     In-memory Store and Bus implementations
 │   └── postgres/   Postgres-backed Store with transactional outbox (pgx/v5)
@@ -28,14 +29,16 @@ goaxon/
 ```
 
 The orders example demonstrates a three-layer hexagonal split:
-**domain** owns the aggregate and the bus handlers (`domain.Wire`);
-**app** is the typed facade — `app.New(events, store)` builds the
-command/query buses internally, calls `domain.Wire`, and exposes
-methods like `PlaceOrder(ctx, customer, amount) (uuid.UUID, error)`;
-**adapters** (in-process `main`, chi HTTP) call only the app service.
-Adapters never import `command`, `query`, or `event` directly. New
-transport layers (gRPC, queues, CLIs) belong as siblings of
-`orders-http`, sharing the same `app` + `domain`.
+**domain** owns the aggregate, the bus handlers (`domain.Wire`), and
+the value objects (`Customer`, `Amount`) that aggregate methods take
+as parameters; **app** is the typed facade — `app.New(events, store)`
+builds the command/query buses internally, takes raw inputs (string,
+int, etc.), parses them into VOs via `validation.Field`, and dispatches
+commands; **adapters** (in-process `main`, chi HTTP) call only the app
+service in standard Go types. Adapters never import `command`, `query`,
+`event`, or `domain` value-object constructors directly. New transport
+layers (gRPC, queues, CLIs) belong as siblings of `orders-http`,
+sharing the same `app` + `domain`.
 
 Module: `github.com/dmitrysharkov/goaxon` (placeholder; rename when publishing).
 Go version: 1.26.
@@ -196,6 +199,39 @@ just gives adapters a stable typed entry point and a place for
 error mapping (`event.ErrStreamNotFound` → `app.ErrNotFound`,
 `domain.ErrNotFound` → `app.ErrNotFound`) so HTTP doesn't reach
 into framework or domain packages just to do `errors.Is` checks.
+
+### Parse-don't-validate at the app boundary
+Aggregate methods take **value objects** (e.g. `Customer`, `Amount`),
+not primitives. VOs construct only via `Parse*` (string input) or
+`MakeXFromY` (typed-but-needs-validation input) functions, so once
+you have one, you know it's valid. This kills field-level validation
+inside the aggregate — `Order.Place(Customer, Amount)` only checks
+state-transition rules ("already placed?") because invalid values
+are not representable.
+
+The parsing happens at the **app layer**, not in adapters. Adapters
+deal in standard Go types (string, int, the `id` arrives as a string
+even when it's "really" a UUID); the app layer parses each input
+into a VO and accumulates failures. Adapters depend on `app` only —
+they don't import `domain` for parsers. This is the structural win:
+every adapter (HTTP, gRPC, CLI, queue consumer) sees the same shape.
+
+### Validation helper
+`goaxon/validation` is a small framework-level package for the
+parse-don't-validate pattern at the app boundary. Generic over input
+and output types, accumulates failures by field name, returns
+`*validation.Error` (a `map[string]string` so it round-trips through
+`encoding/json` without ceremony):
+
+	v := validation.New()
+	cust := validation.Field(v, "customer", domain.ParseCustomer, customer)
+	amt  := validation.Field(v, "amount",   domain.MakeAmountFromCents, amount)
+	if err := v.Err(); err != nil { return "", err }
+
+Adapters do `errors.As(err, &verr)` and render `verr.Fields` as a
+422 body or equivalent. Naming convention: parser functions are
+`Parse*` for string input, `MakeXFromY` for typed-but-needs-validation
+input. Both return `(T, error)`.
 
 ### Aggregate testing: pure black-box, no internals exposed
 `aggregate/aggregatetest` provides a Given/When/Then harness with

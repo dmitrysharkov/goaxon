@@ -1,15 +1,21 @@
-// Package domain holds the orders aggregate, its commands, events, and
-// read model. It's the hexagonal "core" — both the in-process demo
-// (../main.go) and the HTTP demo (../../orders-http/main.go) import
-// from here. Adapters (HTTP, CLI, message bus) talk to the application
-// only through the command/query buses; nothing in this package knows
-// or cares which adapter dispatched the command.
+// Package domain holds the orders aggregate, its commands, events,
+// read model, and the value objects (VOs) the aggregate operates on.
+//
+// VOs (Customer, Amount) carry their own validity invariants — they
+// can only be constructed via Parse* / Make*From* functions. Once you
+// have one, you know it's valid. Aggregate command methods take VOs,
+// so they no longer need to re-check field-level validity; they only
+// check state-transition rules (e.g. "can't ship before placing").
+//
+// Naming: Parse* takes a string input; MakeXFromY takes a typed
+// non-string input. Both return (T, error) and validate.
 package domain
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/dmitrysharkov/goaxon/aggregate"
@@ -19,12 +25,38 @@ import (
 	"github.com/google/uuid"
 )
 
+// ---------- Value Objects ----------
+
+// Customer is the order's customer name. Trimmed, non-empty.
+type Customer string
+
+func ParseCustomer(s string) (Customer, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", errors.New("must not be empty")
+	}
+	return Customer(s), nil
+}
+
+// Amount is an order amount in cents. Strictly positive.
+type Amount int
+
+func MakeAmountFromCents(cents int) (Amount, error) {
+	if cents <= 0 {
+		return 0, errors.New("must be positive")
+	}
+	return Amount(cents), nil
+}
+
+// Cents returns the amount as an integer cent value.
+func (a Amount) Cents() int { return int(a) }
+
 // ---------- Commands ----------
 
 type PlaceOrder struct {
 	OrderID  uuid.UUID
-	Customer string
-	Amount   int // cents
+	Customer Customer
+	Amount   Amount
 }
 
 func (PlaceOrder) CommandType() string { return "PlaceOrder" }
@@ -38,8 +70,8 @@ func (ShipOrder) CommandType() string { return "ShipOrder" }
 // ---------- Events ----------
 
 type OrderPlaced struct {
-	Customer string
-	Amount   int
+	Customer Customer
+	Amount   Amount
 }
 
 func (OrderPlaced) EventType() string { return "OrderPlaced" }
@@ -60,8 +92,8 @@ const (
 
 type Order struct {
 	*aggregate.Base
-	customer string
-	amount   int
+	customer Customer
+	amount   Amount
 	status   orderStatus
 }
 
@@ -86,13 +118,12 @@ func (o *Order) Apply(e event.Event) {
 	}
 }
 
-// Place validates the request and raises OrderPlaced.
-func (o *Order) Place(customer string, amount int) error {
+// Place raises OrderPlaced if the order is new. The customer/amount
+// VOs are already valid by construction, so the only check left here
+// is the state transition.
+func (o *Order) Place(customer Customer, amount Amount) error {
 	if o.status != statusNew {
 		return errors.New("order already placed")
-	}
-	if amount <= 0 {
-		return errors.New("amount must be positive")
 	}
 	o.Raise(o, OrderPlaced{Customer: customer, Amount: amount})
 	return nil
@@ -115,8 +146,8 @@ func (o *Order) Ship() error {
 // OrderSummary is the read-model row built from events.
 type OrderSummary struct {
 	OrderID  uuid.UUID `json:"order_id"`
-	Customer string    `json:"customer"`
-	Amount   int       `json:"amount"`
+	Customer Customer  `json:"customer"`
+	Amount   Amount    `json:"amount"`
 	Shipped  bool      `json:"shipped"`
 }
 

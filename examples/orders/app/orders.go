@@ -1,9 +1,10 @@
 // Package app exposes the orders bounded context as a typed
 // application service. Adapters (HTTP, CLI, message queue, etc.) call
-// these methods instead of touching the command/query bus directly —
-// the bus stays as the dispatch mechanism beneath, but the service
-// layer gives callers a stable typed entry point and centralises
-// error mapping.
+// these methods using only standard Go types — strings, ints, etc. —
+// and the app layer parses them into domain value objects before
+// dispatching commands. Failures from parsing surface as a
+// *ValidationError; failures from the bus or domain surface as
+// regular errors.
 package app
 
 import (
@@ -14,6 +15,7 @@ import (
 	"github.com/dmitrysharkov/goaxon/event"
 	"github.com/dmitrysharkov/goaxon/examples/orders/domain"
 	"github.com/dmitrysharkov/goaxon/query"
+	"github.com/dmitrysharkov/goaxon/validation"
 	"github.com/google/uuid"
 )
 
@@ -42,22 +44,38 @@ func New(events event.Bus, store event.Store) *Orders {
 	return &Orders{commands: commands, queries: queries}
 }
 
-// PlaceOrder generates a UUIDv7 for the new order and dispatches
-// the PlaceOrder command. Returns the new order's ID on success.
-func (o *Orders) PlaceOrder(ctx context.Context, customer string, amount int) (uuid.UUID, error) {
+// PlaceOrder parses the inputs, generates a UUIDv7 for the new order,
+// and dispatches the PlaceOrder command. Returns the new order's ID
+// (as a string for adapter convenience) on success, or a
+// *ValidationError if any input failed to parse.
+func (o *Orders) PlaceOrder(ctx context.Context, customer string, amount int) (string, error) {
+	v := validation.New()
+	cust := validation.Field(v, "customer", domain.ParseCustomer, customer)
+	amt := validation.Field(v, "amount", domain.MakeAmountFromCents, amount)
+	if err := v.Err(); err != nil {
+		return "", err
+	}
+
 	id := uuid.Must(uuid.NewV7())
 	if _, err := command.Send[domain.PlaceOrder, struct{}](ctx, o.commands,
-		domain.PlaceOrder{OrderID: id, Customer: customer, Amount: amount},
+		domain.PlaceOrder{OrderID: id, Customer: cust, Amount: amt},
 	); err != nil {
-		return uuid.Nil, err
+		return "", err
 	}
-	return id, nil
+	return id.String(), nil
 }
 
-// ShipOrder dispatches the ShipOrder command. Returns ErrNotFound if
-// the order doesn't exist; other errors are domain validation
-// failures (already shipped, etc.).
-func (o *Orders) ShipOrder(ctx context.Context, id uuid.UUID) error {
+// ShipOrder parses the order ID and dispatches ShipOrder. Returns
+// ErrNotFound if the order doesn't exist, *ValidationError if the
+// id isn't a valid UUID, or the underlying domain error otherwise
+// (e.g. already shipped).
+func (o *Orders) ShipOrder(ctx context.Context, idStr string) error {
+	v := validation.New()
+	id := validation.Field(v, "id", uuid.Parse, idStr)
+	if err := v.Err(); err != nil {
+		return err
+	}
+
 	_, err := command.Send[domain.ShipOrder, struct{}](ctx, o.commands,
 		domain.ShipOrder{OrderID: id},
 	)
@@ -67,9 +85,16 @@ func (o *Orders) ShipOrder(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-// GetOrder fetches the read-model summary for an order. Returns
-// ErrNotFound if no record exists for the ID.
-func (o *Orders) GetOrder(ctx context.Context, id uuid.UUID) (domain.OrderSummary, error) {
+// GetOrder parses the order ID and fetches the read-model summary.
+// Returns ErrNotFound if no record exists for the ID, or
+// *ValidationError if the id isn't a valid UUID.
+func (o *Orders) GetOrder(ctx context.Context, idStr string) (domain.OrderSummary, error) {
+	v := validation.New()
+	id := validation.Field(v, "id", uuid.Parse, idStr)
+	if err := v.Err(); err != nil {
+		return domain.OrderSummary{}, err
+	}
+
 	summary, err := query.Ask[domain.GetOrderSummary, domain.OrderSummary](ctx, o.queries,
 		domain.GetOrderSummary{OrderID: id},
 	)

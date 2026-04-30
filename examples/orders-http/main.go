@@ -1,8 +1,9 @@
 // Package main exposes the orders bounded context over HTTP using
 // chi as the driving adapter. The HTTP handlers translate requests
 // to / from the typed application service in ../orders/app — they
-// don't touch the command/query buses, the event store, or the
-// domain commands directly.
+// only deal in standard Go types (string, int, etc.) and never touch
+// the command/query buses, the event store, or domain value objects
+// directly.
 package main
 
 import (
@@ -15,9 +16,9 @@ import (
 
 	"github.com/dmitrysharkov/goaxon/examples/orders/app"
 	"github.com/dmitrysharkov/goaxon/store/memory"
+	"github.com/dmitrysharkov/goaxon/validation"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/google/uuid"
 )
 
 func main() {
@@ -57,7 +58,7 @@ type placeOrderRequest struct {
 }
 
 type placeOrderResponse struct {
-	OrderID uuid.UUID `json:"order_id"`
+	OrderID string `json:"order_id"`
 }
 
 func (h *handler) placeOrder(w http.ResponseWriter, r *http.Request) {
@@ -68,48 +69,43 @@ func (h *handler) placeOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := h.orders.PlaceOrder(r.Context(), req.Customer, req.Amount)
 	if err != nil {
-		// Anything the app surfaces here is a validation/business-rule
-		// failure. A real app would distinguish validation from infra
-		// errors with typed errors or wrapping.
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, placeOrderResponse{OrderID: id})
 }
 
 func (h *handler) shipOrder(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid order id")
-		return
-	}
-	if err := h.orders.ShipOrder(r.Context(), id); err != nil {
-		if errors.Is(err, app.ErrNotFound) {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := h.orders.ShipOrder(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeAppError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *handler) getOrder(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	summary, err := h.orders.GetOrder(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid order id")
-		return
-	}
-	summary, err := h.orders.GetOrder(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, app.ErrNotFound) {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+// writeAppError maps the app layer's three error categories to HTTP:
+// *ValidationError → 422 with per-field detail; ErrNotFound → 404;
+// anything else → 400 (domain-rule failures land here).
+func writeAppError(w http.ResponseWriter, err error) {
+	var verr *validation.Error
+	if errors.As(err, &verr) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"errors": verr.Fields})
+		return
+	}
+	if errors.Is(err, app.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
