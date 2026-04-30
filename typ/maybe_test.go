@@ -1,15 +1,15 @@
-package maybe_test
+package typ_test
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
 
-	"github.com/dmitrysharkov/goaxon/maybe"
+	"github.com/dmitrysharkov/goaxon/typ"
 )
 
 func TestSomeIsPresent(t *testing.T) {
-	m := maybe.Some(42)
+	m := typ.Some(42)
 	if !m.IsSome() {
 		t.Fatal("expected IsSome true")
 	}
@@ -23,7 +23,7 @@ func TestSomeIsPresent(t *testing.T) {
 }
 
 func TestNoneIsAbsent(t *testing.T) {
-	m := maybe.None[int]()
+	m := typ.None[int]()
 	if m.IsSome() {
 		t.Fatal("expected IsSome false")
 	}
@@ -37,23 +37,23 @@ func TestNoneIsAbsent(t *testing.T) {
 }
 
 func TestZeroValueIsNone(t *testing.T) {
-	var m maybe.Maybe[string]
+	var m typ.Maybe[string]
 	if !m.IsNone() {
 		t.Fatal("zero value should be None")
 	}
 }
 
 func TestOrElse(t *testing.T) {
-	if v := maybe.Some("a").OrElse("fallback"); v != "a" {
+	if v := typ.Some("a").OrElse("fallback"); v != "a" {
 		t.Fatalf("Some.OrElse: got %q, want %q", v, "a")
 	}
-	if v := maybe.None[string]().OrElse("fallback"); v != "fallback" {
+	if v := typ.None[string]().OrElse("fallback"); v != "fallback" {
 		t.Fatalf("None.OrElse: got %q, want %q", v, "fallback")
 	}
 }
 
 func TestMustGet(t *testing.T) {
-	if v := maybe.Some(7).MustGet(); v != 7 {
+	if v := typ.Some(7).MustGet(); v != 7 {
 		t.Fatalf("got %d, want 7", v)
 	}
 
@@ -62,51 +62,51 @@ func TestMustGet(t *testing.T) {
 			t.Fatal("expected panic on MustGet on None")
 		}
 	}()
-	maybe.None[int]().MustGet()
+	typ.None[int]().MustGet()
 }
 
 func TestMapTransformsSome(t *testing.T) {
-	m := maybe.Some(3)
-	doubled := maybe.Map(m, func(n int) int { return n * 2 })
+	m := typ.Some(3)
+	doubled := typ.Map(m, func(n int) int { return n * 2 })
 	if v, _ := doubled.Get(); v != 6 {
 		t.Fatalf("got %d, want 6", v)
 	}
 }
 
 func TestMapPropagatesNone(t *testing.T) {
-	m := maybe.None[int]()
-	doubled := maybe.Map(m, func(n int) int { return n * 2 })
+	m := typ.None[int]()
+	doubled := typ.Map(m, func(n int) int { return n * 2 })
 	if !doubled.IsNone() {
 		t.Fatal("Map(None, f) should be None")
 	}
 }
 
 func TestMapChangesType(t *testing.T) {
-	m := maybe.Some(3)
-	asString := maybe.Map(m, func(n int) string { return strings.Repeat("x", n) })
+	m := typ.Some(3)
+	asString := typ.Map(m, func(n int) string { return strings.Repeat("x", n) })
 	if v, _ := asString.Get(); v != "xxx" {
 		t.Fatalf("got %q, want xxx", v)
 	}
 }
 
 func TestFlatMapChainsMaybes(t *testing.T) {
-	m := maybe.Some(4)
-	even := func(n int) maybe.Maybe[int] {
+	m := typ.Some(4)
+	even := func(n int) typ.Maybe[int] {
 		if n%2 == 0 {
-			return maybe.Some(n)
+			return typ.Some(n)
 		}
-		return maybe.None[int]()
+		return typ.None[int]()
 	}
-	if v, ok := maybe.FlatMap(m, even).Get(); !ok || v != 4 {
+	if v, ok := typ.FlatMap(m, even).Get(); !ok || v != 4 {
 		t.Fatalf("FlatMap on Some(even): got (%d, %v)", v, ok)
 	}
 
-	odd := maybe.Some(3)
-	if !maybe.FlatMap(odd, even).IsNone() {
+	odd := typ.Some(3)
+	if !typ.FlatMap(odd, even).IsNone() {
 		t.Fatal("FlatMap should produce None when f returns None")
 	}
 
-	if !maybe.FlatMap(maybe.None[int](), even).IsNone() {
+	if !typ.FlatMap(typ.None[int](), even).IsNone() {
 		t.Fatal("FlatMap on None should be None")
 	}
 }
@@ -114,7 +114,7 @@ func TestFlatMapChainsMaybes(t *testing.T) {
 // --- JSON ---
 
 func TestSomeMarshalsAsValue(t *testing.T) {
-	data, err := json.Marshal(maybe.Some("hello"))
+	data, err := json.Marshal(typ.Some("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestSomeMarshalsAsValue(t *testing.T) {
 }
 
 func TestNoneMarshalsAsNull(t *testing.T) {
-	data, err := json.Marshal(maybe.None[string]())
+	data, err := json.Marshal(typ.None[string]())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestNoneMarshalsAsNull(t *testing.T) {
 }
 
 func TestUnmarshalNullProducesNone(t *testing.T) {
-	var m maybe.Maybe[int]
+	var m typ.Maybe[int]
 	if err := json.Unmarshal([]byte(`null`), &m); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestUnmarshalNullProducesNone(t *testing.T) {
 }
 
 func TestUnmarshalValueProducesSome(t *testing.T) {
-	var m maybe.Maybe[int]
+	var m typ.Maybe[int]
 	if err := json.Unmarshal([]byte(`42`), &m); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestUnmarshalValueProducesSome(t *testing.T) {
 
 func TestRoundTripStruct(t *testing.T) {
 	type wrapper struct {
-		Note maybe.Maybe[string] `json:"note"`
+		Note typ.Maybe[string] `json:"note"`
 	}
 
 	cases := []struct {
@@ -164,8 +164,8 @@ func TestRoundTripStruct(t *testing.T) {
 		in   wrapper
 		want string
 	}{
-		{"some", wrapper{Note: maybe.Some("hi")}, `{"note":"hi"}`},
-		{"none", wrapper{Note: maybe.None[string]()}, `{"note":null}`},
+		{"some", wrapper{Note: typ.Some("hi")}, `{"note":"hi"}`},
+		{"none", wrapper{Note: typ.None[string]()}, `{"note":null}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

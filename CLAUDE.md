@@ -16,7 +16,7 @@ goaxon/
 ├── command/        Type-safe command bus (generics-based)
 ├── query/          Type-safe query bus (generics-based)
 ├── validation/     Generic Validator + ValidationError for app-layer parse-don't-validate
-├── maybe/          Generic Maybe[T] (Some / None) for optional VO fields
+├── typ/            Generic type primitives — Unit alias and Maybe[T]; growth area for List etc.
 ├── store/
 │   ├── memory/     In-memory Store and Bus implementations
 │   └── postgres/   Postgres-backed Store with transactional outbox (pgx/v5)
@@ -248,10 +248,10 @@ not framework code. Don't propose `UnmarshalJSON`-with-validation
 again — we discussed it, and the read-time re-judging breaks event
 sourcing semantics.
 
-### Optional VOs use `maybe.Maybe[T]`, not `*T`
+### Optional VOs use `typ.Maybe[T]`, not `*T`
 For fields that are genuinely optional in the domain (the orders
 example has an optional `Notes` on each order), wrap in
-`maybe.Maybe[T]` rather than using `*T`. Reasons:
+`typ.Maybe[T]` rather than using `*T`. Reasons:
 
 - `Maybe[T]` makes "absent" an explicit, value-typed state. `*T`
   conflates absence with pointer-aliasing semantics callers usually

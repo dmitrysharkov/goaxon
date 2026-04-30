@@ -6,12 +6,12 @@ import (
 
 	"github.com/dmitrysharkov/goaxon/aggregate/aggregatetest"
 	"github.com/dmitrysharkov/goaxon/examples/orders/domain"
-	"github.com/dmitrysharkov/goaxon/maybe"
+	"github.com/dmitrysharkov/goaxon/typ"
 )
 
 // noNotes is a shorthand for the absent-Notes case used in tests
 // where the optional field doesn't matter.
-func noNotes() maybe.Maybe[domain.Notes] { return maybe.None[domain.Notes]() }
+func noNotes() typ.Maybe[domain.Notes] { return typ.None[domain.Notes]() }
 
 // ---------- VO parser tests ----------
 
@@ -95,7 +95,7 @@ func TestPlaceFreshOrder(t *testing.T) {
 
 func TestPlaceFreshOrderWithNotes(t *testing.T) {
 	test := aggregatetest.New[*domain.Order](t, domain.NewOrder)
-	notes := maybe.Some(domain.Notes("ring the doorbell"))
+	notes := typ.Some(domain.Notes("ring the doorbell"))
 	test.
 		When(func(o *domain.Order) error { return o.Place("Alice", 4200, notes) }).
 		Then(domain.OrderPlaced{CustomerName: "Alice", Amount: 4200, Notes: notes})
