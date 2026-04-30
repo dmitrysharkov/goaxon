@@ -14,12 +14,13 @@ import (
 	"github.com/dmitrysharkov/goaxon/event"
 	"github.com/dmitrysharkov/goaxon/query"
 	"github.com/dmitrysharkov/goaxon/store/memory"
+	"github.com/google/uuid"
 )
 
 // ---------- Commands ----------
 
 type PlaceOrder struct {
-	OrderID  string
+	OrderID  uuid.UUID
 	Customer string
 	Amount   int // cents
 }
@@ -27,7 +28,7 @@ type PlaceOrder struct {
 func (PlaceOrder) CommandType() string { return "PlaceOrder" }
 
 type ShipOrder struct {
-	OrderID string
+	OrderID uuid.UUID
 }
 
 func (ShipOrder) CommandType() string { return "ShipOrder" }
@@ -65,7 +66,7 @@ type Order struct {
 func (Order) AggregateType() string { return "Order" }
 
 // newOrder is the factory the repository uses when loading or creating.
-func newOrder(id string) *Order {
+func newOrder(id uuid.UUID) *Order {
 	o := &Order{Base: &aggregate.Base{}}
 	_ = o.SetID(id)
 	return o
@@ -112,7 +113,7 @@ func (o *Order) Ship() error {
 
 // OrderSummary is the read-model row built from events.
 type OrderSummary struct {
-	OrderID  string
+	OrderID  uuid.UUID
 	Customer string
 	Amount   int
 	Shipped  bool
@@ -122,11 +123,11 @@ type OrderSummary struct {
 // system this would back onto a SQL table or a key-value store.
 type summaryProjection struct {
 	mu      sync.RWMutex
-	records map[string]OrderSummary
+	records map[uuid.UUID]OrderSummary
 }
 
 func newSummaryProjection() *summaryProjection {
-	return &summaryProjection{records: make(map[string]OrderSummary)}
+	return &summaryProjection{records: make(map[uuid.UUID]OrderSummary)}
 }
 
 func (p *summaryProjection) onOrderPlaced(_ context.Context, env event.Envelope) error {
@@ -153,7 +154,7 @@ func (p *summaryProjection) onOrderShipped(_ context.Context, env event.Envelope
 // ---------- Queries ----------
 
 type GetOrderSummary struct {
-	OrderID string
+	OrderID uuid.UUID
 }
 
 func (GetOrderSummary) QueryType() string { return "GetOrderSummary" }
@@ -183,7 +184,7 @@ func main() {
 		if err != nil {
 			return struct{}{}, err
 		}
-		if o.AggregateID() == "" {
+		if o.AggregateID() == uuid.Nil {
 			o = newOrder(cmd.OrderID)
 		}
 		if err := o.Place(cmd.Customer, cmd.Amount); err != nil {
@@ -214,24 +215,27 @@ func main() {
 		return rec, nil
 	})
 
-	// Drive it
+	// Drive it. UUIDv7 is recommended for aggregate IDs — its time-ordered
+	// prefix gives stores like Postgres better B-tree locality on the
+	// events table.
+	orderID := uuid.Must(uuid.NewV7())
 	if _, err := command.Send[PlaceOrder, struct{}](ctx, commandBus, PlaceOrder{
-		OrderID: "ord-1", Customer: "Alice", Amount: 4200,
+		OrderID: orderID, Customer: "Alice", Amount: 4200,
 	}); err != nil {
 		panic(err)
 	}
-	if _, err := command.Send[ShipOrder, struct{}](ctx, commandBus, ShipOrder{OrderID: "ord-1"}); err != nil {
+	if _, err := command.Send[ShipOrder, struct{}](ctx, commandBus, ShipOrder{OrderID: orderID}); err != nil {
 		panic(err)
 	}
 
-	got, err := query.Ask[GetOrderSummary, OrderSummary](ctx, queryBus, GetOrderSummary{OrderID: "ord-1"})
+	got, err := query.Ask[GetOrderSummary, OrderSummary](ctx, queryBus, GetOrderSummary{OrderID: orderID})
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("Order summary: %+v\n", got)
 
 	// And verify the underlying event stream
-	envs, _ := store.Load(ctx, "ord-1")
+	envs, _ := store.Load(ctx, orderID)
 	fmt.Printf("Stored %d events:\n", len(envs))
 	for _, env := range envs {
 		fmt.Printf("  seq=%d type=%s\n", env.Sequence, env.Payload.EventType())

@@ -1,4 +1,5 @@
 /bin/
+/orders
 *.exe
 *.test
 *.out
@@ -9,6 +10,7 @@
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 
 # Go-specific
 vendor/

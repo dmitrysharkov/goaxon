@@ -7,6 +7,8 @@ package event
 import (
 	"context"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Event is the marker interface every domain event must satisfy.
@@ -23,8 +25,11 @@ type Event interface {
 // to store, route, and replay it. Application code rarely constructs
 // envelopes directly — the aggregate repository does it on commit.
 type Envelope struct {
-	// AggregateID identifies the stream this event belongs to.
-	AggregateID string
+	// AggregateID identifies the stream this event belongs to. Must be a
+	// stable UUID for the lifetime of the aggregate; UUIDv7 is recommended
+	// because its time-ordered prefix gives the events table good B-tree
+	// locality.
+	AggregateID uuid.UUID
 
 	// AggregateType is the kind of aggregate that produced the event
 	// (e.g. "Order"). Useful for routing and replay filtering.
@@ -73,9 +78,9 @@ type Store interface {
 	// expectedVersion is the sequence of the last event the caller
 	// observed; if the stream's actual head differs, append fails with
 	// ErrConcurrencyConflict. Pass 0 to assert the stream is new.
-	Append(ctx context.Context, aggregateID string, expectedVersion uint64, events []Envelope) error
+	Append(ctx context.Context, aggregateID uuid.UUID, expectedVersion uint64, events []Envelope) error
 
 	// Load returns every event in the stream, in order. Used by the
 	// aggregate repository to rebuild state.
-	Load(ctx context.Context, aggregateID string) ([]Envelope, error)
+	Load(ctx context.Context, aggregateID uuid.UUID) ([]Envelope, error)
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dmitrysharkov/goaxon/event"
+	"github.com/google/uuid"
 )
 
 // Root is the interface every aggregate must implement.
@@ -22,8 +23,8 @@ import (
 //     interface — different aggregates handle different commands.
 type Root interface {
 	// AggregateID returns the stream identifier. Must be stable for
-	// the lifetime of the aggregate.
-	AggregateID() string
+	// the lifetime of the aggregate. UUIDv7 is recommended (time-ordered).
+	AggregateID() uuid.UUID
 
 	// AggregateType returns a stable type name (e.g. "Order").
 	AggregateType() string
@@ -44,27 +45,27 @@ type Root interface {
 //	    // ...
 //	}
 type Base struct {
-	id           string
-	version      uint64
-	uncommitted  []event.Event
+	id          uuid.UUID
+	version     uint64
+	uncommitted []event.Event
 }
 
 // SetID assigns the aggregate's stream identifier. Call this from
 // the constructor of new aggregates. It returns an error if called
-// twice — the ID is immutable once set.
-func (b *Base) SetID(id string) error {
-	if b.id != "" {
+// twice — the ID is immutable once set — or if id is the zero UUID.
+func (b *Base) SetID(id uuid.UUID) error {
+	if b.id != uuid.Nil {
 		return errors.New("aggregate: ID already set")
 	}
-	if id == "" {
-		return errors.New("aggregate: ID cannot be empty")
+	if id == uuid.Nil {
+		return errors.New("aggregate: ID cannot be the zero UUID")
 	}
 	b.id = id
 	return nil
 }
 
 // AggregateID returns the stream identifier.
-func (b *Base) AggregateID() string { return b.id }
+func (b *Base) AggregateID() uuid.UUID { return b.id }
 
 // Version returns the sequence number of the last applied event.
 // Zero means no events have been applied yet.
@@ -104,7 +105,7 @@ func (b *Base) rehydrate(self Root, e event.Event) {
 type Repository[A Root] struct {
 	store   event.Store
 	bus     event.Bus
-	factory func(id string) A
+	factory func(id uuid.UUID) A
 }
 
 // NewRepository wires a repository for aggregate type A.
@@ -112,7 +113,7 @@ type Repository[A Root] struct {
 // factory is a constructor that returns a zero-value aggregate with its
 // ID set. The repository calls it before replaying events, so factories
 // should not perform any business logic — just allocate and tag.
-func NewRepository[A Root](store event.Store, bus event.Bus, factory func(id string) A) *Repository[A] {
+func NewRepository[A Root](store event.Store, bus event.Bus, factory func(id uuid.UUID) A) *Repository[A] {
 	return &Repository[A]{store: store, bus: bus, factory: factory}
 }
 
@@ -130,7 +131,7 @@ type baseAccessor interface {
 func (b *Base) getBase() *Base { return b }
 
 // Load reconstructs an aggregate by replaying its event stream.
-func (r *Repository[A]) Load(ctx context.Context, id string) (A, error) {
+func (r *Repository[A]) Load(ctx context.Context, id uuid.UUID) (A, error) {
 	var zero A
 	envelopes, err := r.store.Load(ctx, id)
 	if err != nil {
@@ -149,8 +150,18 @@ func (r *Repository[A]) Load(ctx context.Context, id string) (A, error) {
 
 // Save persists uncommitted events and publishes them to the bus.
 //
-// Persistence and publishing are NOT atomic in this implementation —
-// for production you'd want a transactional outbox. v1 keeps it simple.
+// Two delivery modes, picked at runtime by type-asserting r.store
+// against event.Outbox:
+//
+//   - Plain Store (e.g. in-memory): append, then synchronously
+//     bus.Publish each event. Append-and-publish is NOT atomic; a
+//     crash between the two leaves events persisted but unpublished.
+//     Acceptable for in-process setups; not for durable stores.
+//
+//   - Outbox-capable Store (e.g. Postgres): append writes events +
+//     outbox rows in a single transaction. Save then returns; an
+//     out-of-band dispatcher reads the outbox and publishes. This
+//     is the crash-safe path.
 func (r *Repository[A]) Save(ctx context.Context, agg A) error {
 	ba, ok := any(agg).(baseAccessor)
 	if !ok {
@@ -179,6 +190,9 @@ func (r *Repository[A]) Save(ctx context.Context, agg A) error {
 	}
 	base.markCommitted()
 
+	if _, hasOutbox := r.store.(event.Outbox); hasOutbox {
+		return nil
+	}
 	for _, env := range envelopes {
 		if err := r.bus.Publish(ctx, env); err != nil {
 			return fmt.Errorf("aggregate: publish %s: %w", env.Payload.EventType(), err)

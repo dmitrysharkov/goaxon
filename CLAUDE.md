@@ -10,12 +10,15 @@ and roadmap. Read it fully before suggesting changes.
 
 ```
 goaxon/
-├── event/          Event, Envelope, Bus, Store interfaces (the foundation)
+├── event/          Event, Envelope, Bus, Store interfaces; JSON Registry; Outbox interface; Dispatcher
 ├── aggregate/      Aggregate Root, embeddable Base, generic Repository[A]
 ├── command/        Type-safe command bus (generics-based)
 ├── query/          Type-safe query bus (generics-based)
 ├── store/
-│   └── memory/     In-memory Store and Bus implementations
+│   ├── memory/     In-memory Store and Bus implementations
+│   └── postgres/   Postgres-backed Store with transactional outbox (pgx/v5)
+├── internal/
+│   └── pgtest/     Embedded-postgres + pgtestdb harness used by tests
 └── examples/
     └── orders/     End-to-end demo: place + ship an order, project a read model
 ```
@@ -99,6 +102,62 @@ Every dispatch (`Send`, `Ask`, `Publish`) takes `context.Context` as the
 first parameter. Cancellation, deadlines, and tracing flow through it.
 Don't add APIs that omit it.
 
+### JSON event registry for persistent stores
+Persistent stores need to round-trip a domain event through bytes. We chose
+JSON via a generic Registry rather than reflection-based discovery or a
+wider codec interface:
+
+```go
+reg := event.NewRegistry()
+event.Register[OrderPlaced](reg)
+```
+
+The in-memory store doesn't need a registry — it keeps Go values directly.
+Only stores that serialize (Postgres, future Kafka, etc.) consult one.
+
+If JSON becomes a real bottleneck (it usually doesn't), add a codec
+parameter on the Registry rather than a second registry type.
+
+### Transactional outbox via interface assertion
+A persistent store that wants crash-safe dispatch implements both
+`event.Store` and `event.Outbox`. The Repository type-asserts at runtime:
+if the store is also an `Outbox`, `Save` writes events + outbox in one
+transaction and returns; the synchronous `bus.Publish` loop is skipped.
+An out-of-band `event.Dispatcher` reads the outbox and publishes.
+
+This keeps the in-memory store untouched (still synchronous publish) and
+avoids growing `Repository`'s constructor with a "publisher strategy" knob.
+
+Delivery is at-least-once: a Publish that succeeds but a MarkDispatched
+that subsequently fails (or a process crash between the two) will
+redeliver. The framework's "handlers must be idempotent" rule absorbs
+that — see Conventions.
+
+The Dispatcher stops a batch on the first publish error to preserve
+ordering for projections; the failing entry stays pending and is retried
+on the next tick. There is no built-in DLQ — surface failures via
+`WithErrorHandler` and decide policy yourself.
+
+### Aggregate IDs are `uuid.UUID`
+`event.Envelope.AggregateID`, `aggregate.Root.AggregateID()`, and the
+factories passed to `Repository` are all typed `uuid.UUID` (from
+`github.com/google/uuid`). UUIDv7 is recommended at the application
+level — `uuid.NewV7()` — because the time-ordered prefix gives the
+events table good B-tree locality. The framework doesn't enforce v7;
+v4 or any valid UUID will work.
+
+The Postgres `aggregate_id` column is `uuid`, not `text`. We pass values
+to pgx as `[16]byte(id)` (and scan back the same way) since pgx/v5
+recognizes `[16]byte` for the uuid type without extra codec
+registration.
+
+### Optimistic concurrency in Postgres
+The events table has `PRIMARY KEY (aggregate_id, sequence)`. `Append`
+checks the head sequence inside its tx and converts unique-constraint
+violations to `event.ErrConcurrencyConflict`. Both paths fire on real
+concurrent appenders; together they make the contract identical to the
+in-memory store's.
+
 ### No memory arenas
 We considered them. They don't fit:
 - Events live ~forever (in the store, in projections), so they can't share an
@@ -125,8 +184,15 @@ for `sync.Pool` first.
 - **Event handlers must be idempotent.** Events may be redelivered on retry
   or replay. A handler that increments a counter without a dedupe key is
   broken.
-- **No `_test.go` files yet.** When we add them, prefer table-driven tests
-  and use `testify/require` (not `assert`) for fail-fast behaviour.
+- **Events stored in a persistent Store must be registered** via
+  `event.Register[T](registry)` before `Load` is called on that store. The
+  in-memory store doesn't need this; Postgres (and future serializing
+  stores) do.
+- **Tests that need Postgres use `internal/pgtest`.** `pgtest.Run(m)` from
+  `TestMain` boots an embedded PG; `pgtest.NewPool(t, ddl)` returns a
+  fresh, isolated database per test (template-clone via pgtestdb).
+  Multiple test binaries running in parallel each get their own
+  RuntimePath and free port, so `go test ./...` is safe.
 
 ---
 
@@ -134,24 +200,34 @@ for `sync.Pool` first.
 
 These are documented gaps, not things to fix without discussion:
 
-1. **No transactional outbox.** `Repository.Save` appends to the store, then
-   publishes to the bus — non-atomic. With the in-memory bus this is fine.
-   Adding a Postgres store will require an outbox.
-2. **Synchronous event bus.** A slow projection blocks command throughput.
-   Acceptable for v1 and tests; needs to become async for production.
+1. **In-memory bus has no transactional outbox.** `Repository.Save` against
+   a plain `event.Store` (the in-memory one) appends and then publishes
+   non-atomically. The whole thing is in-process so a crash takes
+   everything down anyway. The Postgres store implements `event.Outbox`
+   and gets crash-safe dispatch via the Dispatcher.
+2. **Synchronous event bus.** `memory.Bus` delivers handlers serially in
+   `Publish` — a slow projection blocks the publisher. With the Postgres
+   store this is mitigated because the Dispatcher publishes off the
+   command path, but the bus implementation itself is still synchronous.
+   An async Bus is on the roadmap.
 3. **No snapshotting.** Long event streams replay slowly. Will be added
    with a `Snapshotter` interface.
 4. **No event upcasters.** Renaming an event type or changing its payload
    shape is currently a breaking change to the event log.
-5. **In-memory store only.** The `event.Store` interface is designed for
-   pluggable backends; Postgres is the next target.
+5. **Postgres dispatcher is single-instance.** `LoadPending` uses a plain
+   `LIMIT`, no `SELECT … FOR UPDATE SKIP LOCKED`. Running multiple
+   dispatchers against the same outbox would double-publish. Single
+   dispatcher per process is fine for v1; multi-dispatcher safety is a
+   follow-up.
 
 ---
 
 ## Roadmap (in rough priority order)
 
+- [x] Postgres event store with transactional outbox
+- [x] UUIDv7 aggregate IDs (typed `uuid.UUID` at the framework boundary)
 - [ ] Async event bus with retries and DLQ
-- [ ] Postgres event store with transactional outbox
+- [ ] Multi-dispatcher safety (`SELECT … FOR UPDATE SKIP LOCKED` in `LoadPending`)
 - [ ] Snapshotting (every N events, restore from latest)
 - [ ] Sagas / process managers for cross-aggregate workflows
 - [ ] Event upcasters for schema evolution
@@ -183,6 +259,13 @@ These are documented gaps, not things to fix without discussion:
 ```bash
 # Run the example
 cd examples/orders && go run .
+
+# Run all tests (the postgres ones boot embedded PG — first run downloads
+# the binary into ~/.cache/goaxon-pgtest, subsequent runs are quick)
+go test ./...
+
+# Run only the in-process tests (no embedded PG)
+go test ./event/... ./aggregate/... ./command/... ./query/... ./store/memory/...
 
 # Run all benchmarks (when they exist)
 go test -bench=. -benchmem ./...

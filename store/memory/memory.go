@@ -9,23 +9,24 @@ import (
 	"sync"
 
 	"github.com/dmitrysharkov/goaxon/event"
+	"github.com/google/uuid"
 )
 
 // Store is an in-memory append-only event store. Streams are keyed by
 // aggregate ID. Safe for concurrent use.
 type Store struct {
 	mu      sync.RWMutex
-	streams map[string][]event.Envelope
+	streams map[uuid.UUID][]event.Envelope
 }
 
 // NewStore returns an empty in-memory store.
 func NewStore() *Store {
-	return &Store{streams: make(map[string][]event.Envelope)}
+	return &Store{streams: make(map[uuid.UUID][]event.Envelope)}
 }
 
 // Append implements event.Store. It enforces optimistic concurrency by
 // comparing expectedVersion against the current head sequence.
-func (s *Store) Append(ctx context.Context, aggregateID string, expectedVersion uint64, events []event.Envelope) error {
+func (s *Store) Append(ctx context.Context, aggregateID uuid.UUID, expectedVersion uint64, events []event.Envelope) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -41,7 +42,7 @@ func (s *Store) Append(ctx context.Context, aggregateID string, expectedVersion 
 }
 
 // Load implements event.Store.
-func (s *Store) Load(ctx context.Context, aggregateID string) ([]event.Envelope, error) {
+func (s *Store) Load(ctx context.Context, aggregateID uuid.UUID) ([]event.Envelope, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
