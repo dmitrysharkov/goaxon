@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/example/goaxon/aggregate"
-	"github.com/example/goaxon/command"
-	"github.com/example/goaxon/event"
-	"github.com/example/goaxon/query"
-	"github.com/example/goaxon/store/memory"
+	"github.com/dmitrysharkov/goaxon/aggregate"
+	"github.com/dmitrysharkov/goaxon/command"
+	"github.com/dmitrysharkov/goaxon/event"
+	"github.com/dmitrysharkov/goaxon/query"
+	"github.com/dmitrysharkov/goaxon/store/memory"
 )
 
 // ---------- Commands ----------

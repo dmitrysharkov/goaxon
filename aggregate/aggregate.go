@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/example/goaxon/event"
+	"github.com/dmitrysharkov/goaxon/event"
 )
 
 // Root is the interface every aggregate must implement.

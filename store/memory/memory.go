@@ -8,7 +8,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/example/goaxon/event"
+	"github.com/dmitrysharkov/goaxon/event"
 )
 
 // Store is an in-memory append-only event store. Streams are keyed by
