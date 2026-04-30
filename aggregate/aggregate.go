@@ -45,9 +45,15 @@ type Root interface {
 //	    // ...
 //	}
 type Base struct {
-	id          uuid.UUID
-	version     uint64
-	uncommitted []event.Event
+	id uuid.UUID
+	// currentVersion is the sequence after every applied event, including
+	// raised-but-not-yet-saved ones. Returned by Version().
+	currentVersion uint64
+	// committedVersion is the sequence the store has acknowledged. Used
+	// directly as expectedVersion on the next Save and updated to match
+	// currentVersion only after a successful append.
+	committedVersion uint64
+	uncommitted      []event.Event
 }
 
 // SetID assigns the aggregate's stream identifier. Call this from
@@ -67,9 +73,10 @@ func (b *Base) SetID(id uuid.UUID) error {
 // AggregateID returns the stream identifier.
 func (b *Base) AggregateID() uuid.UUID { return b.id }
 
-// Version returns the sequence number of the last applied event.
-// Zero means no events have been applied yet.
-func (b *Base) Version() uint64 { return b.version }
+// Version returns the sequence number of the last applied event,
+// counting both rehydrated and raised-but-uncommitted ones. Zero means
+// no events have been applied yet.
+func (b *Base) Version() uint64 { return b.currentVersion }
 
 // Raise records a new event, applies it to the aggregate (so subsequent
 // command handlers see the updated state), and queues it for persistence.
@@ -81,22 +88,29 @@ func (b *Base) Version() uint64 { return b.version }
 func (b *Base) Raise(self Root, e event.Event) {
 	self.Apply(e)
 	b.uncommitted = append(b.uncommitted, e)
-	b.version++
+	b.currentVersion++
 }
 
 // Uncommitted returns events emitted since the last load or commit.
 // The repository drains this list on save.
 func (b *Base) Uncommitted() []event.Event { return b.uncommitted }
 
-// markCommitted clears uncommitted events. Called by the repository
-// after a successful append.
-func (b *Base) markCommitted() { b.uncommitted = nil }
+// markCommitted clears uncommitted events and advances committedVersion
+// to match currentVersion. Called by the repository after a successful
+// append — never on a failed one, so committedVersion always reflects
+// what the store actually holds.
+func (b *Base) markCommitted() {
+	b.uncommitted = nil
+	b.committedVersion = b.currentVersion
+}
 
 // rehydrate replays a stored event during loading without queuing it
-// for re-persistence. The repository uses this; user code should not.
+// for re-persistence. The event came from the store, so both versions
+// advance. The repository uses this; user code should not.
 func (b *Base) rehydrate(self Root, e event.Event) {
 	self.Apply(e)
-	b.version++
+	b.currentVersion++
+	b.committedVersion++
 }
 
 // Repository loads and saves aggregates by replaying their event streams.
@@ -173,7 +187,7 @@ func (r *Repository[A]) Save(ctx context.Context, agg A) error {
 		return nil
 	}
 
-	expectedVersion := base.Version() - uint64(len(pending))
+	expectedVersion := base.committedVersion
 	envelopes := make([]event.Envelope, len(pending))
 	for i, e := range pending {
 		envelopes[i] = event.Envelope{
