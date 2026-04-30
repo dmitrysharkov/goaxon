@@ -107,20 +107,37 @@ func sharedCacheDir() (string, error) {
 // Call from TestMain in any package that needs a real Postgres:
 //
 //	func TestMain(m *testing.M) { pgtest.Run(m) }
+//
+// Cleanup runs via defer inside runTests, so a panic from m.Run still
+// shuts the postmaster down and removes the temp runtime dir. Errors
+// from Stop and RemoveAll are surfaced on stderr rather than swallowed
+// — silent leaks here have shown up later as port collisions or
+// orphaned PG processes that need pkill.
 func Run(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+func runTests(m *testing.M) int {
 	once.Do(boot)
 	if bootErr != nil {
 		fmt.Fprintln(os.Stderr, bootErr)
-		os.Exit(1)
+		return 1
 	}
-	code := m.Run()
+	defer cleanup()
+	return m.Run()
+}
+
+func cleanup() {
 	if pg != nil {
-		_ = pg.Stop()
+		if err := pg.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "pgtest: stop: %v\n", err)
+		}
 	}
 	if runtimeDir != "" {
-		_ = os.RemoveAll(runtimeDir)
+		if err := os.RemoveAll(runtimeDir); err != nil {
+			fmt.Fprintf(os.Stderr, "pgtest: remove runtime dir: %v\n", err)
+		}
 	}
-	os.Exit(code)
 }
 
 // NewPool returns a pgxpool.Pool connected to a fresh, isolated database.
