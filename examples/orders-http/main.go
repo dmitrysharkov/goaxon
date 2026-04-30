@@ -53,8 +53,8 @@ type handler struct {
 }
 
 type placeOrderRequest struct {
-	Customer string `json:"customer"`
-	Amount   int    `json:"amount"`
+	CustomerName string `json:"customer_name"`
+	Amount       int    `json:"amount"`
 }
 
 type placeOrderResponse struct {
@@ -67,7 +67,7 @@ func (h *handler) placeOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
 		return
 	}
-	id, err := h.orders.PlaceOrder(r.Context(), req.Customer, req.Amount)
+	id, err := h.orders.PlaceOrder(r.Context(), req.CustomerName, req.Amount)
 	if err != nil {
 		writeAppError(w, err)
 		return

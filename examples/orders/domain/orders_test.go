@@ -10,17 +10,17 @@ import (
 
 // ---------- VO parser tests ----------
 
-func TestParseCustomerRejectsEmpty(t *testing.T) {
-	if _, err := domain.ParseCustomer(""); err == nil {
+func TestParseCustomerNameRejectsEmpty(t *testing.T) {
+	if _, err := domain.ParseCustomerName(""); err == nil {
 		t.Fatal("expected error on empty input")
 	}
-	if _, err := domain.ParseCustomer("   "); err == nil {
+	if _, err := domain.ParseCustomerName("   "); err == nil {
 		t.Fatal("expected error on whitespace-only input")
 	}
 }
 
-func TestParseCustomerTrimsWhitespace(t *testing.T) {
-	got, err := domain.ParseCustomer("  Alice  ")
+func TestParseCustomerNameTrimsWhitespace(t *testing.T) {
+	got, err := domain.ParseCustomerName("  Alice  ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +59,13 @@ func TestPlaceFreshOrder(t *testing.T) {
 	test := aggregatetest.New[*domain.Order](t, domain.NewOrder)
 	test.
 		When(func(o *domain.Order) error { return o.Place("Alice", 4200) }).
-		Then(domain.OrderPlaced{Customer: "Alice", Amount: 4200})
+		Then(domain.OrderPlaced{CustomerName: "Alice", Amount: 4200})
 }
 
 func TestPlaceAlreadyPlacedFails(t *testing.T) {
 	test := aggregatetest.New[*domain.Order](t, domain.NewOrder)
 	test.
-		Given(domain.OrderPlaced{Customer: "Alice", Amount: 4200}).
+		Given(domain.OrderPlaced{CustomerName: "Alice", Amount: 4200}).
 		When(func(o *domain.Order) error { return o.Place("Bob", 100) }).
 		ThenError(errors.New("order already placed"))
 }
@@ -73,7 +73,7 @@ func TestPlaceAlreadyPlacedFails(t *testing.T) {
 func TestShipPlacedOrder(t *testing.T) {
 	test := aggregatetest.New[*domain.Order](t, domain.NewOrder)
 	test.
-		Given(domain.OrderPlaced{Customer: "Alice", Amount: 4200}).
+		Given(domain.OrderPlaced{CustomerName: "Alice", Amount: 4200}).
 		When(func(o *domain.Order) error { return o.Ship() }).
 		Then(domain.OrderShipped{})
 }
@@ -89,7 +89,7 @@ func TestShipTwiceFails(t *testing.T) {
 	test := aggregatetest.New[*domain.Order](t, domain.NewOrder)
 	test.
 		Given(
-			domain.OrderPlaced{Customer: "Alice", Amount: 4200},
+			domain.OrderPlaced{CustomerName: "Alice", Amount: 4200},
 			domain.OrderShipped{},
 		).
 		When(func(o *domain.Order) error { return o.Ship() }).

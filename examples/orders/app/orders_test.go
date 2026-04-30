@@ -43,7 +43,7 @@ func TestPlaceOrderValidationErrors(t *testing.T) {
 	if !errors.As(err, &verr) {
 		t.Fatalf("got %T, want *ValidationError", err)
 	}
-	if _, ok := verr.Fields["customer"]; !ok {
+	if _, ok := verr.Fields["customer_name"]; !ok {
 		t.Fatalf("missing customer field error: %+v", verr.Fields)
 	}
 	if _, ok := verr.Fields["amount"]; !ok {
@@ -144,7 +144,7 @@ func TestGetOrderAfterPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if summary.OrderID.String() != id ||
-		summary.Customer != "Alice" ||
+		summary.CustomerName != "Alice" ||
 		summary.Amount.Cents() != 4200 ||
 		summary.Shipped {
 		t.Fatalf("got %+v", summary)

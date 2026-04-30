@@ -1,14 +1,20 @@
 // Package domain holds the orders aggregate, its commands, events,
 // read model, and the value objects (VOs) the aggregate operates on.
 //
-// VOs (Customer, Amount) carry their own validity invariants — they
-// can only be constructed via Parse* / Make*From* functions. Once you
-// have one, you know it's valid. Aggregate command methods take VOs,
-// so they no longer need to re-check field-level validity; they only
-// check state-transition rules (e.g. "can't ship before placing").
+// VOs (CustomerName, Amount, OrderID) carry their own validity
+// invariants — they can only be constructed via Parse* / Make*From*
+// functions. Once you have one, you know it's valid. Aggregate command
+// methods take VOs, so they no longer need to re-check field-level
+// validity; they only check state-transition rules (e.g. "can't ship
+// before placing").
 //
 // Naming: Parse* takes a string input; MakeXFromY takes a typed
 // non-string input. Both return (T, error) and validate.
+//
+// Note on naming: "CustomerName" not "Customer". The customer is an
+// entity (their own aggregate, billing address, etc.); what we capture
+// on the order is the customer's name at order time. Same reasoning
+// would apply if we ever modelled Email vs EmailAddress, etc.
 package domain
 
 import (
@@ -27,15 +33,59 @@ import (
 
 // ---------- Value Objects ----------
 
-// Customer is the order's customer name. Trimmed, non-empty.
-type Customer string
+// OrderID is a typed wrapper around uuid.UUID. It exists so the type
+// system catches accidents like "CustomerID passed where OrderID was
+// expected" — uuid.UUID alone can't do that. The trade-off is the
+// MarshalJSON / UnmarshalJSON / String boilerplate per ID type; in a
+// real domain with many aggregates you'd codegen these.
+type OrderID uuid.UUID
 
-func ParseCustomer(s string) (Customer, error) {
+// ParseOrderID parses the dashed-string UUID form ("01900000-...").
+func ParseOrderID(s string) (OrderID, error) {
+	u, err := uuid.Parse(s)
+	if err != nil {
+		return OrderID{}, err
+	}
+	return OrderID(u), nil
+}
+
+// NewOrderID generates a fresh UUIDv7 (time-ordered prefix gives the
+// events table good B-tree locality).
+func NewOrderID() OrderID { return OrderID(uuid.Must(uuid.NewV7())) }
+
+// String returns the dashed-UUID form.
+func (id OrderID) String() string { return uuid.UUID(id).String() }
+
+// MarshalText keeps the wire format as the dashed-UUID string. Without
+// this, encoding/json would default-marshal the underlying [16]byte as
+// a JSON array of integers. encoding/json picks up TextMarshaler
+// automatically, so JSON serialization works through this without
+// needing a separate MarshalJSON.
+func (id OrderID) MarshalText() ([]byte, error) { return uuid.UUID(id).MarshalText() }
+
+// UnmarshalText parses the dashed-UUID string back to an OrderID.
+// This is FORMAT conversion, not domain validation — it's fine for
+// replay (see CLAUDE.md "Events are immutable facts; replay trusts
+// them").
+func (id *OrderID) UnmarshalText(data []byte) error {
+	var u uuid.UUID
+	if err := u.UnmarshalText(data); err != nil {
+		return err
+	}
+	*id = OrderID(u)
+	return nil
+}
+
+// CustomerName is the order's customer-name snapshot. Trimmed,
+// non-empty.
+type CustomerName string
+
+func ParseCustomerName(s string) (CustomerName, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", errors.New("must not be empty")
 	}
-	return Customer(s), nil
+	return CustomerName(s), nil
 }
 
 // Amount is an order amount in cents. Strictly positive.
@@ -54,24 +104,29 @@ func (a Amount) Cents() int { return int(a) }
 // ---------- Commands ----------
 
 type PlaceOrder struct {
-	OrderID  uuid.UUID
-	Customer Customer
-	Amount   Amount
+	OrderID      OrderID
+	CustomerName CustomerName
+	Amount       Amount
 }
 
 func (PlaceOrder) CommandType() string { return "PlaceOrder" }
 
 type ShipOrder struct {
-	OrderID uuid.UUID
+	OrderID OrderID
 }
 
 func (ShipOrder) CommandType() string { return "ShipOrder" }
 
 // ---------- Events ----------
+//
+// JSON tags freeze the wire format independently of Go field names —
+// renaming `CustomerName` → `Customer` in Go later wouldn't break
+// replay of old events. CLAUDE.md's "events are facts" rule applies
+// to event SHAPE, not just field values.
 
 type OrderPlaced struct {
-	Customer Customer
-	Amount   Amount
+	CustomerName CustomerName `json:"customer_name"`
+	Amount       Amount       `json:"amount"`
 }
 
 func (OrderPlaced) EventType() string { return "OrderPlaced" }
@@ -92,14 +147,16 @@ const (
 
 type Order struct {
 	*aggregate.Base
-	customer Customer
-	amount   Amount
-	status   orderStatus
+	customerName CustomerName
+	amount       Amount
+	status       orderStatus
 }
 
 func (Order) AggregateType() string { return "Order" }
 
 // NewOrder is the factory the repository uses when loading or creating.
+// The framework's contract is uuid.UUID; the conversion to OrderID
+// happens at the domain boundary.
 func NewOrder(id uuid.UUID) *Order {
 	o := &Order{Base: &aggregate.Base{}}
 	_ = o.SetID(id)
@@ -110,7 +167,7 @@ func NewOrder(id uuid.UUID) *Order {
 func (o *Order) Apply(e event.Event) {
 	switch ev := e.(type) {
 	case OrderPlaced:
-		o.customer = ev.Customer
+		o.customerName = ev.CustomerName
 		o.amount = ev.Amount
 		o.status = statusPlaced
 	case OrderShipped:
@@ -118,14 +175,14 @@ func (o *Order) Apply(e event.Event) {
 	}
 }
 
-// Place raises OrderPlaced if the order is new. The customer/amount
-// VOs are already valid by construction, so the only check left here
-// is the state transition.
-func (o *Order) Place(customer Customer, amount Amount) error {
+// Place raises OrderPlaced if the order is new. The VOs are already
+// valid by construction, so the only check left here is the state
+// transition.
+func (o *Order) Place(name CustomerName, amount Amount) error {
 	if o.status != statusNew {
 		return errors.New("order already placed")
 	}
-	o.Raise(o, OrderPlaced{Customer: customer, Amount: amount})
+	o.Raise(o, OrderPlaced{CustomerName: name, Amount: amount})
 	return nil
 }
 
@@ -145,10 +202,10 @@ func (o *Order) Ship() error {
 
 // OrderSummary is the read-model row built from events.
 type OrderSummary struct {
-	OrderID  uuid.UUID `json:"order_id"`
-	Customer Customer  `json:"customer"`
-	Amount   Amount    `json:"amount"`
-	Shipped  bool      `json:"shipped"`
+	OrderID      OrderID      `json:"order_id"`
+	CustomerName CustomerName `json:"customer_name"`
+	Amount       Amount       `json:"amount"`
+	Shipped      bool         `json:"shipped"`
 }
 
 // SummaryProjection is a thread-safe map keyed by order ID, populated
@@ -168,9 +225,9 @@ func (p *SummaryProjection) OnOrderPlaced(_ context.Context, env event.Envelope)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.records[env.AggregateID] = OrderSummary{
-		OrderID:  env.AggregateID,
-		Customer: ev.Customer,
-		Amount:   ev.Amount,
+		OrderID:      OrderID(env.AggregateID),
+		CustomerName: ev.CustomerName,
+		Amount:       ev.Amount,
 	}
 	return nil
 }
@@ -195,7 +252,7 @@ func (p *SummaryProjection) Get(id uuid.UUID) (OrderSummary, bool) {
 // ---------- Queries ----------
 
 type GetOrderSummary struct {
-	OrderID uuid.UUID
+	OrderID OrderID
 }
 
 func (GetOrderSummary) QueryType() string { return "GetOrderSummary" }
@@ -225,21 +282,22 @@ func Wire(
 	eventBus.Subscribe("OrderShipped", summary.OnOrderShipped)
 
 	command.Register(commandBus, func(ctx context.Context, cmd PlaceOrder) (struct{}, error) {
-		o, err := repo.Load(ctx, cmd.OrderID)
+		rawID := uuid.UUID(cmd.OrderID)
+		o, err := repo.Load(ctx, rawID)
 		switch {
 		case errors.Is(err, event.ErrStreamNotFound):
-			o = NewOrder(cmd.OrderID)
+			o = NewOrder(rawID)
 		case err != nil:
 			return struct{}{}, err
 		}
-		if err := o.Place(cmd.Customer, cmd.Amount); err != nil {
+		if err := o.Place(cmd.CustomerName, cmd.Amount); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, repo.Save(ctx, o)
 	})
 
 	command.Register(commandBus, func(ctx context.Context, cmd ShipOrder) (struct{}, error) {
-		o, err := repo.Load(ctx, cmd.OrderID)
+		o, err := repo.Load(ctx, uuid.UUID(cmd.OrderID))
 		if err != nil {
 			return struct{}{}, err
 		}
@@ -250,7 +308,7 @@ func Wire(
 	})
 
 	query.Register(queryBus, func(_ context.Context, q GetOrderSummary) (OrderSummary, error) {
-		rec, ok := summary.Get(q.OrderID)
+		rec, ok := summary.Get(uuid.UUID(q.OrderID))
 		if !ok {
 			return OrderSummary{}, fmt.Errorf("%w: %s", ErrNotFound, q.OrderID)
 		}

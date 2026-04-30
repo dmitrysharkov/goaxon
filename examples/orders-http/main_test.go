@@ -40,7 +40,7 @@ func decode[T any](t *testing.T, w *httptest.ResponseRecorder) T {
 
 func TestPlaceOrder(t *testing.T) {
 	s := newServer()
-	w := do(t, s, "POST", "/orders", `{"customer":"Alice","amount":4200}`)
+	w := do(t, s, "POST", "/orders", `{"customer_name":"Alice","amount":4200}`)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
@@ -64,7 +64,7 @@ func TestPlaceOrderBadJSON(t *testing.T) {
 
 func TestPlaceOrderInvalidAmount(t *testing.T) {
 	s := newServer()
-	w := do(t, s, "POST", "/orders", `{"customer":"Alice","amount":0}`)
+	w := do(t, s, "POST", "/orders", `{"customer_name":"Alice","amount":0}`)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status %d, want 422", w.Code)
 	}
@@ -72,14 +72,14 @@ func TestPlaceOrderInvalidAmount(t *testing.T) {
 	if _, ok := body["errors"]["amount"]; !ok {
 		t.Fatalf("missing amount field error: %+v", body)
 	}
-	if _, ok := body["errors"]["customer"]; ok {
+	if _, ok := body["errors"]["customer_name"]; ok {
 		t.Fatalf("unexpected customer error (only amount was bad): %+v", body)
 	}
 }
 
 func TestPlaceOrderMultipleValidationErrors(t *testing.T) {
 	s := newServer()
-	w := do(t, s, "POST", "/orders", `{"customer":"","amount":-5}`)
+	w := do(t, s, "POST", "/orders", `{"customer_name":"","amount":-5}`)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status %d, want 422", w.Code)
 	}
@@ -87,7 +87,7 @@ func TestPlaceOrderMultipleValidationErrors(t *testing.T) {
 	if _, ok := body["errors"]["amount"]; !ok {
 		t.Fatalf("missing amount field error: %+v", body)
 	}
-	if _, ok := body["errors"]["customer"]; !ok {
+	if _, ok := body["errors"]["customer_name"]; !ok {
 		t.Fatalf("missing customer field error: %+v", body)
 	}
 }
@@ -117,7 +117,7 @@ func TestPlaceThenShipThenGet(t *testing.T) {
 	s := newServer()
 
 	// Place
-	w := do(t, s, "POST", "/orders", `{"customer":"Bob","amount":100}`)
+	w := do(t, s, "POST", "/orders", `{"customer_name":"Bob","amount":100}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("place status %d", w.Code)
 	}
@@ -135,8 +135,8 @@ func TestPlaceThenShipThenGet(t *testing.T) {
 		t.Fatalf("get status %d, body=%s", w.Code, w.Body.String())
 	}
 	got := decode[map[string]any](t, w)
-	if got["customer"] != "Bob" {
-		t.Fatalf("customer=%v want Bob", got["customer"])
+	if got["customer_name"] != "Bob" {
+		t.Fatalf("customer=%v want Bob", got["customer_name"])
 	}
 	if got["shipped"] != true {
 		t.Fatalf("shipped=%v want true", got["shipped"])
