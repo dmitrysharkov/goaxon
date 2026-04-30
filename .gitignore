@@ -5,6 +5,7 @@
 *.test
 *.out
 *.prof
+coverage.html
 
 # OS / editor noise
 .DS_Store
