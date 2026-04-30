@@ -1,7 +1,8 @@
-// Package main exposes the orders domain over HTTP using chi as the
-// driving adapter. The domain core, commands, queries, and projection
-// are shared with ../orders/main.go via the ../orders/domain package
-// — this binary only owns the HTTP-to-CQRS translation.
+// Package main exposes the orders bounded context over HTTP using
+// chi as the driving adapter. The HTTP handlers translate requests
+// to / from the typed application service in ../orders/app — they
+// don't touch the command/query buses, the event store, or the
+// domain commands directly.
 package main
 
 import (
@@ -12,10 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dmitrysharkov/goaxon/command"
-	"github.com/dmitrysharkov/goaxon/event"
-	"github.com/dmitrysharkov/goaxon/examples/orders/domain"
-	"github.com/dmitrysharkov/goaxon/query"
+	"github.com/dmitrysharkov/goaxon/examples/orders/app"
 	"github.com/dmitrysharkov/goaxon/store/memory"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -30,18 +28,13 @@ func main() {
 	}
 }
 
-// newServer wires in-memory infrastructure, registers domain handlers,
-// and returns a chi router. Split out from main so tests can drive it
-// without binding a port.
+// newServer wires in-memory infrastructure, builds the application
+// service, and returns a chi router. Split out from main so tests
+// can drive it without binding a port.
 func newServer() http.Handler {
-	store := memory.NewStore()
-	eventBus := memory.NewBus()
-	commandBus := command.New()
-	queryBus := query.New()
+	orders := app.New(memory.NewBus(), memory.NewStore())
 
-	domain.Wire(commandBus, queryBus, eventBus, store)
-
-	h := &handler{commandBus: commandBus, queryBus: queryBus}
+	h := &handler{orders: orders}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -55,8 +48,7 @@ func newServer() http.Handler {
 }
 
 type handler struct {
-	commandBus *command.Bus
-	queryBus   *query.Bus
+	orders *app.Orders
 }
 
 type placeOrderRequest struct {
@@ -74,18 +66,15 @@ func (h *handler) placeOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
 		return
 	}
-	orderID := uuid.Must(uuid.NewV7())
-	if _, err := command.Send[domain.PlaceOrder, struct{}](
-		r.Context(), h.commandBus,
-		domain.PlaceOrder{OrderID: orderID, Customer: req.Customer, Amount: req.Amount},
-	); err != nil {
-		// Anything the command handler returns at this layer is a
-		// validation/business-rule failure. A real app would distinguish
-		// validation from infra errors with typed errors or wrapping.
+	id, err := h.orders.PlaceOrder(r.Context(), req.Customer, req.Amount)
+	if err != nil {
+		// Anything the app surfaces here is a validation/business-rule
+		// failure. A real app would distinguish validation from infra
+		// errors with typed errors or wrapping.
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, placeOrderResponse{OrderID: orderID})
+	writeJSON(w, http.StatusCreated, placeOrderResponse{OrderID: id})
 }
 
 func (h *handler) shipOrder(w http.ResponseWriter, r *http.Request) {
@@ -94,11 +83,9 @@ func (h *handler) shipOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid order id")
 		return
 	}
-	if _, err := command.Send[domain.ShipOrder, struct{}](
-		r.Context(), h.commandBus, domain.ShipOrder{OrderID: id},
-	); err != nil {
-		if errors.Is(err, event.ErrStreamNotFound) {
-			writeError(w, http.StatusNotFound, "order not found")
+	if err := h.orders.ShipOrder(r.Context(), id); err != nil {
+		if errors.Is(err, app.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -113,11 +100,9 @@ func (h *handler) getOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid order id")
 		return
 	}
-	summary, err := query.Ask[domain.GetOrderSummary, domain.OrderSummary](
-		r.Context(), h.queryBus, domain.GetOrderSummary{OrderID: id},
-	)
+	summary, err := h.orders.GetOrder(r.Context(), id)
 	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
+		if errors.Is(err, app.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}

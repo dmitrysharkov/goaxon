@@ -22,6 +22,7 @@ outbox vs the long-running-tx model that won).
 goaxon/
 ├── event/             Event, Envelope, Bus, Store; JSON Registry; Outbox + Claim; Dispatcher
 ├── aggregate/         Aggregate Root, Base helper, generic Repository[A]
+│   └── aggregatetest/ Given/When/Then black-box harness for aggregate tests
 ├── command/           Type-safe command bus (generics, no reflection)
 ├── query/             Type-safe query bus
 ├── store/
@@ -30,10 +31,18 @@ goaxon/
 ├── internal/
 │   └── pgtest/        Embedded-postgres + pgtestdb harness for tests
 └── examples/
-    ├── orders/        In-process driver
-    │   └── domain/    Shared orders core (commands, events, aggregate, projection)
-    └── orders-http/   HTTP driver (chi) against the same domain
+    ├── orders/        In-process driver (calls the app service)
+    │   ├── domain/    Aggregate, commands, events, projection (the core)
+    │   └── app/       Typed application service (the use-case layer)
+    └── orders-http/   HTTP driver (chi) against the same app + domain
 ```
+
+The orders example demonstrates a three-layer hexagonal split:
+the **domain** owns the aggregate and the bus handlers, the **app**
+package is a typed facade (`PlaceOrder(ctx, customer, amount)`) that
+dispatches through the command/query bus, and **adapters**
+(`orders/main.go`, `orders-http/main.go`) call only the app service —
+they don't import `command`, `query`, or `event` directly.
 
 ## Try it
 
@@ -67,6 +76,8 @@ go test ./...
 - **At-least-once delivery; handlers must be idempotent.** No implicit retries, no built-in DLQ — those are deliberate infrastructure decisions, not hidden defaults.
 - **UUIDv7 aggregate IDs.** Time-ordered prefix gives the events table good B-tree locality.
 - **Hexagonal-friendly examples.** The orders aggregate is one core; the in-process and HTTP demos are two driving adapters against it. Adding gRPC, a CLI, or a queue consumer is a sibling directory, not a fork.
+- **Application-layer facade in the example.** `examples/orders/app` exposes typed methods (`PlaceOrder`, `ShipOrder`, `GetOrder`) that adapters call instead of touching the command/query bus directly. The bus stays as the dispatch mechanism beneath; the app layer just gives adapters a stable API and centralises error mapping (`event.ErrStreamNotFound` and `domain.ErrNotFound` → `app.ErrNotFound`).
+- **Black-box aggregate tests.** `aggregate/aggregatetest` provides a Given/When/Then harness using only the aggregate's public surface — no internals of `Base` are exposed to support testing.
 - **`context.Context` everywhere.** Cancellation, deadlines, and tracing flow through every dispatch.
 
 ## Known limitations

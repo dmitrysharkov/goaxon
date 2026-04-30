@@ -12,6 +12,7 @@ and roadmap. Read it fully before suggesting changes.
 goaxon/
 ├── event/          Event, Envelope, Bus, Store interfaces; JSON Registry; Outbox interface; Dispatcher
 ├── aggregate/      Aggregate Root, embeddable Base, generic Repository[A]
+│   └── aggregatetest/  Given/When/Then black-box harness for aggregate unit tests
 ├── command/        Type-safe command bus (generics-based)
 ├── query/          Type-safe query bus (generics-based)
 ├── store/
@@ -20,15 +21,21 @@ goaxon/
 ├── internal/
 │   └── pgtest/     Embedded-postgres + pgtestdb harness used by tests
 └── examples/
-    ├── orders/         In-process driver against the orders domain
-    │   └── domain/     Shared orders core (commands, events, aggregate, projection, Wire)
-    └── orders-http/    HTTP driver (chi) against the same domain
+    ├── orders/         In-process driver
+    │   ├── domain/     Aggregate, commands, events, projection, Wire (the core)
+    │   └── app/        Typed application service (the use-case layer)
+    └── orders-http/    HTTP driver (chi) against the same app + domain
 ```
 
-The two `examples/orders*` binaries deliberately share the same
-`examples/orders/domain` package — they're hexagonal-style *driving
-adapters* against one application core. New transport layers (gRPC,
-queues, CLIs) belong as siblings, not as forks of the domain.
+The orders example demonstrates a three-layer hexagonal split:
+**domain** owns the aggregate and the bus handlers (`domain.Wire`);
+**app** is the typed facade — `app.New(events, store)` builds the
+command/query buses internally, calls `domain.Wire`, and exposes
+methods like `PlaceOrder(ctx, customer, amount) (uuid.UUID, error)`;
+**adapters** (in-process `main`, chi HTTP) call only the app service.
+Adapters never import `command`, `query`, or `event` directly. New
+transport layers (gRPC, queues, CLIs) belong as siblings of
+`orders-http`, sharing the same `app` + `domain`.
 
 Module: `github.com/dmitrysharkov/goaxon` (placeholder; rename when publishing).
 Go version: 1.26.
@@ -176,6 +183,31 @@ checks the head sequence inside its tx and converts unique-constraint
 violations to `event.ErrConcurrencyConflict`. Both paths fire on real
 concurrent appenders; together they make the contract identical to the
 in-memory store's.
+
+### Application layer is a typed facade, not a bypass
+The orders example has an `app` package between adapters and the
+command/query bus. It's a typed facade: each use case becomes a
+method (`PlaceOrder(ctx, customer, amount)`), the implementation
+dispatches through the bus to a domain handler. We deliberately
+*don't* skip the bus and call `repo.Save` directly from the app
+layer — the bus is what gives the framework its value (multi-handler
+fan-out for events, future cross-process dispatch). The app layer
+just gives adapters a stable typed entry point and a place for
+error mapping (`event.ErrStreamNotFound` → `app.ErrNotFound`,
+`domain.ErrNotFound` → `app.ErrNotFound`) so HTTP doesn't reach
+into framework or domain packages just to do `errors.Is` checks.
+
+### Aggregate testing: pure black-box, no internals exposed
+`aggregate/aggregatetest` provides a Given/When/Then harness with
+zero coupling to `Base` internals. Given replays events through the
+public `Apply` method only — versions and `uncommitted` aren't
+maintained because tests never reach Save. When runs the action;
+Then reads `Uncommitted()` (already public on `Base` for legitimate
+reasons). The only assumption is what we already require of
+aggregates: `Apply` is deterministic and side-effect-free state
+mutation. Don't add a `RehydrateForTest` (or similar) method on
+`Base` to support testing — we tried, and it turned out to be
+unnecessary.
 
 ### No memory arenas
 We considered them. They don't fit:
