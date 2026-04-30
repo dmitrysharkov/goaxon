@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dmitrysharkov/goaxon/command"
+	"github.com/dmitrysharkov/goaxon/event"
 	"github.com/dmitrysharkov/goaxon/examples/orders/domain"
 	"github.com/dmitrysharkov/goaxon/query"
 	"github.com/dmitrysharkov/goaxon/store/memory"
@@ -96,6 +97,10 @@ func (h *handler) shipOrder(w http.ResponseWriter, r *http.Request) {
 	if _, err := command.Send[domain.ShipOrder, struct{}](
 		r.Context(), h.commandBus, domain.ShipOrder{OrderID: id},
 	); err != nil {
+		if errors.Is(err, event.ErrStreamNotFound) {
+			writeError(w, http.StatusNotFound, "order not found")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

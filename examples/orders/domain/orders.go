@@ -195,11 +195,11 @@ func Wire(
 
 	command.Register(commandBus, func(ctx context.Context, cmd PlaceOrder) (struct{}, error) {
 		o, err := repo.Load(ctx, cmd.OrderID)
-		if err != nil {
-			return struct{}{}, err
-		}
-		if o.AggregateID() == uuid.Nil {
+		switch {
+		case errors.Is(err, event.ErrStreamNotFound):
 			o = NewOrder(cmd.OrderID)
+		case err != nil:
+			return struct{}{}, err
 		}
 		if err := o.Place(cmd.Customer, cmd.Amount); err != nil {
 			return struct{}{}, err

@@ -86,7 +86,11 @@ func (s *plainStore) Append(_ context.Context, id uuid.UUID, expected uint64, ev
 func (s *plainStore) Load(_ context.Context, id uuid.UUID) ([]event.Envelope, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]event.Envelope(nil), s.streams[id]...), nil
+	stream, ok := s.streams[id]
+	if !ok {
+		return nil, event.ErrStreamNotFound
+	}
+	return append([]event.Envelope(nil), stream...), nil
 }
 
 // outboxStore satisfies both event.Store and event.Outbox; it's a

@@ -145,6 +145,13 @@ type baseAccessor interface {
 func (b *Base) getBase() *Base { return b }
 
 // Load reconstructs an aggregate by replaying its event stream.
+//
+// Returns event.ErrStreamNotFound (wrapped) when the stream is empty.
+// Callers that want "create new on miss" semantics should branch on
+// errors.Is(err, event.ErrStreamNotFound) and build a fresh aggregate
+// themselves; the repository deliberately doesn't do that silently
+// because most use cases (e.g. ShipOrder) want the error to propagate
+// as a real not-found.
 func (r *Repository[A]) Load(ctx context.Context, id uuid.UUID) (A, error) {
 	var zero A
 	envelopes, err := r.store.Load(ctx, id)

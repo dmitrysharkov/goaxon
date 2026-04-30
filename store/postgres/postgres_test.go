@@ -138,11 +138,11 @@ func TestConcurrencyConflictUniqueViolation(t *testing.T) {
 	}
 }
 
-func TestLoadEmptyStream(t *testing.T) {
+func TestLoadEmptyStreamReturnsNotFound(t *testing.T) {
 	s := newStore(t)
 	got, err := s.Load(context.Background(), nonexistentID)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, event.ErrStreamNotFound) {
+		t.Fatalf("err = %v, want event.ErrStreamNotFound", err)
 	}
 	if got != nil {
 		t.Fatalf("got %+v, want nil", got)

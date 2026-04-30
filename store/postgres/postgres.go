@@ -270,9 +270,9 @@ func scanOutboxRows(rows pgx.Rows, registry *event.Registry) ([]event.OutboxEntr
 }
 
 // Load implements event.Store. Events are returned in sequence order.
-// Returns (nil, nil) for an unknown stream — the same convention the
-// in-memory store uses, so the aggregate repository can start from a
-// fresh aggregate without a special "not found" branch.
+// Returns event.ErrStreamNotFound when no events exist for the given
+// aggregate ID; callers (typically the aggregate repository) decide
+// whether that means "create new" or "real not-found error."
 func (s *Store) Load(ctx context.Context, aggregateID uuid.UUID) ([]event.Envelope, error) {
 	rows, err := s.pool.Query(ctx, `
         SELECT aggregate_id, aggregate_type, sequence, event_type, payload, metadata, occurred_at
@@ -319,6 +319,9 @@ func (s *Store) Load(ctx context.Context, aggregateID uuid.UUID) ([]event.Envelo
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: rows: %w", err)
+	}
+	if len(out) == 0 {
+		return nil, event.ErrStreamNotFound
 	}
 	return out, nil
 }

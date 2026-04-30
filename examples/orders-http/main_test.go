@@ -84,8 +84,8 @@ func TestShipOrderUnknownID(t *testing.T) {
 	s := newServer()
 	id := uuid.Must(uuid.NewV7())
 	w := do(t, s, "POST", "/orders/"+id.String()+"/ship", "")
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400 (cannot ship unplaced)", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 (no such order stream)", w.Code)
 	}
 }
 

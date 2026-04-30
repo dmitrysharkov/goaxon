@@ -52,7 +52,7 @@ func (s *Store) Load(ctx context.Context, aggregateID uuid.UUID) ([]event.Envelo
 
 	stream, ok := s.streams[aggregateID]
 	if !ok {
-		return nil, nil // empty stream is fine; caller starts from a fresh aggregate
+		return nil, event.ErrStreamNotFound
 	}
 	// Return a copy so callers can't mutate our internal state.
 	out := make([]event.Envelope, len(stream))
